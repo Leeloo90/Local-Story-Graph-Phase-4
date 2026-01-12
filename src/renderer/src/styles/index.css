@@ -1,0 +1,145 @@
+/**
+ * Global Styles
+ * Story Graph v4.0 - Forensic Minimalist Design Language System
+ */
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+  }
+
+  body {
+    @apply bg-void text-text-primary;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    font-size: 14px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    overflow: hidden;
+  }
+
+  #root {
+    @apply w-screen h-screen overflow-hidden;
+  }
+
+  /* Typography */
+  h1, h2, h3, h4, h5, h6 {
+    @apply font-semibold;
+    line-height: 1.2;
+  }
+
+  /* Forensic Typography - STRICT REQUIREMENT for timecodes */
+  .timecode,
+  .frame-count,
+  .file-path,
+  .coordinate {
+    font-family: 'JetBrains Mono', monospace;
+    letter-spacing: 0.05em;
+  }
+
+  /* Scrollbars */
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  ::-webkit-scrollbar-track {
+    @apply bg-void-dark;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    @apply bg-void-gray rounded;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-surface-high;
+  }
+
+  /* Selection */
+  ::selection {
+    @apply bg-accent-indigo bg-opacity-30;
+  }
+}
+
+@layer components {
+  /* Panel styles */
+  .panel {
+    @apply bg-surface-high border border-void-gray;
+  }
+
+  .panel-header {
+    @apply px-4 py-3 border-b border-void-gray flex items-center justify-between;
+  }
+
+  /* Button styles */
+  .btn {
+    @apply px-4 py-2 rounded-lg font-medium transition-all duration-200;
+    @apply focus:outline-none focus:ring-2 focus:ring-accent-indigo focus:ring-offset-2 focus:ring-offset-void;
+  }
+
+  .btn-primary {
+    @apply btn bg-accent-indigo text-white hover:bg-indigo-600 active:scale-95;
+  }
+
+  .btn-secondary {
+    @apply btn bg-surface-high border border-void-gray hover:bg-surface-low;
+  }
+
+  .btn-ghost {
+    @apply btn hover:bg-surface-high;
+  }
+
+  /* Input styles */
+  .input {
+    @apply w-full px-3 py-2 bg-void-dark border border-void-gray rounded-lg;
+    @apply text-text-primary placeholder-text-tertiary;
+    @apply focus:outline-none focus:ring-2 focus:ring-accent-indigo focus:border-transparent;
+  }
+
+  /* Badge styles */
+  .badge {
+    @apply inline-flex items-center px-2 py-1 rounded text-xs font-medium;
+  }
+
+  .badge-status-active {
+    @apply badge bg-accent-green bg-opacity-20 text-accent-green;
+  }
+
+  .badge-status-archived {
+    @apply badge bg-text-tertiary bg-opacity-20 text-text-secondary;
+  }
+
+  .badge-multicam {
+    @apply badge bg-accent-amber bg-opacity-20 text-accent-amber;
+  }
+
+  .badge-transcript {
+    @apply badge bg-accent-purple bg-opacity-20 text-accent-purple;
+  }
+}
+
+@layer utilities {
+  /* Glass effect */
+  .glass {
+    backdrop-filter: blur(12px);
+    background: rgba(28, 28, 30, 0.8);
+  }
+
+  /* Drag handle */
+  .drag-handle {
+    cursor: grab;
+  }
+
+  .drag-handle:active {
+    cursor: grabbing;
+  }
+}
