@@ -93,36 +93,37 @@ const SpineNode: React.FC<NodeProps<ReactFlowNodeData>> = ({ data, selected }) =
         )}
       </div>
 
-      {/* Handles */}
-      {/* Left Anchor - Horizontal chaining (bidirectional spine-to-spine) */}
+      {/* PORTS (TARGETS) - These accept incoming connections from Satellites */}
+
+      {/* Left Port: For PREPEND (J-Cut) Satellites */}
       <Handle
-        type="both"
+        type="target"
         position={Position.Left}
-        className="!w-3 !h-3 !bg-accent-purple !border-2 !border-surface-high"
+        className="!w-3 !h-3 !bg-accent-purple !border-2 !border-surface-high hover:!bg-white"
         id="anchor-left"
       />
 
-      {/* Right Anchor - Horizontal chaining (bidirectional spine-to-spine) */}
+      {/* Right Port: For APPEND (L-Cut) Satellites */}
       <Handle
-        type="both"
+        type="target"
         position={Position.Right}
-        className="!w-3 !h-3 !bg-accent-purple !border-2 !border-surface-high"
+        className="!w-3 !h-3 !bg-accent-purple !border-2 !border-surface-high hover:!bg-white"
         id="anchor-right"
       />
 
-      {/* Top Anchor - Receives satellites anchoring from their BOTTOM */}
+      {/* Top Port: For STACK (Overlay) Satellites */}
       <Handle
-        type="both"
+        type="target"
         position={Position.Top}
-        className="!w-3 !h-3 !bg-accent-purple !border-2 !border-surface-high"
+        className="!w-3 !h-3 !bg-accent-purple !border-2 !border-surface-high hover:!bg-white"
         id="anchor-top"
       />
 
-      {/* Bottom Anchor - Only for music satellites */}
+      {/* Bottom Port: Reserved for music satellites (later phase) */}
       <Handle
-        type="source"
+        type="target"
         position={Position.Bottom}
-        className="!w-3 !h-3 !bg-accent-purple !border-2 !border-surface-high"
+        className="!w-3 !h-3 !bg-accent-purple !border-2 !border-surface-high hover:!bg-white"
         id="anchor-bottom"
       />
     </div>

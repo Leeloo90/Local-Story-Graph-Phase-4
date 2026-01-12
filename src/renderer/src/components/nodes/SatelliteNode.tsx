@@ -72,38 +72,38 @@ const SatelliteNode: React.FC<NodeProps<ReactFlowNodeData>> = ({ data, selected 
         )}
       </div>
 
-      {/* Handles - Satellites have anchors on all sides */}
-      {/* Top Anchor - Can anchor TO another satellite (stacking) OR receive from below */}
+      {/* PORTS (TARGETS) - For Recursive Anchoring: Other satellites can anchor TO this node */}
+
+      {/* Top Port: Receive Stacked Satellites */}
       <Handle
-        type="both"
+        type="target"
         position={Position.Top}
-        className="!w-4 !h-4 !bg-accent-cyan !border-2 !border-white"
+        className="!w-4 !h-4 !bg-accent-cyan !border-2 !border-white z-50"
         id="anchor-top"
-        style={{ opacity: 1 }}
       />
 
-      {/* Bottom Anchor - Can anchor TO Spine TOP OR anchor TO Satellite TOP */}
+      {/* Left Port: Receive Lead-In Satellites */}
       <Handle
-        type="both"
-        position={Position.Bottom}
-        className="!w-3 !h-3 !bg-accent-cyan !border-2 !border-surface-high"
-        id="anchor-bottom"
-      />
-
-      {/* Left Anchor - Horizontal connections (both directions) */}
-      <Handle
-        type="both"
+        type="target"
         position={Position.Left}
         className="!w-3 !h-3 !bg-accent-cyan !border-2 !border-surface-high"
         id="anchor-left"
       />
 
-      {/* Right Anchor - Horizontal connections (both directions) */}
+      {/* Right Port: Receive Lead-Out Satellites */}
       <Handle
-        type="both"
+        type="target"
         position={Position.Right}
         className="!w-3 !h-3 !bg-accent-cyan !border-2 !border-surface-high"
         id="anchor-right"
+      />
+
+      {/* TETHER (SOURCE) - This is the "Output" used to connect THIS satellite to a Parent (Spine or Sat) */}
+      <Handle
+        type="source"
+        position={Position.Bottom}
+        className="!w-3 !h-3 !bg-white !border-2 !border-accent-cyan"
+        id="tether-source"
       />
     </div>
   );

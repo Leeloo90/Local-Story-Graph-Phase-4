@@ -15,7 +15,7 @@ import {
   useReactFlow,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
-import { StoryNode as StoryNodeType, MediaAsset, ConnectionMode, HandleId } from '../../../shared/types';
+import { StoryNode as StoryNodeType, MediaAsset, ConnectionMode } from '../../../shared/types';
 import {
   ArrowLeft,
   Maximize2,
@@ -377,74 +377,79 @@ const CanvasView: React.FC<CanvasViewProps> = ({ projectId, canvasId, onBack }) 
   }, [showBucket, setNodes]);
   const [edges, setEdges, onEdgesChange] = useEdgesState([]);
 
-  // Validate connection to ensure correct handles are used
+  // Validate connections - allow any handle to connect to any handle
   const isValidConnection = useCallback((connection: Connection) => {
-    if (!connection.sourceHandle || !connection.targetHandle) {
-      return false;
-    }
+    const validPorts = ['anchor-top', 'anchor-left', 'anchor-right'];
+    const sourceIsPort = validPorts.includes(connection.sourceHandle || '');
+    const targetIsPort = validPorts.includes(connection.targetHandle || '');
 
-    console.log('[Canvas] Validating connection handles:', {
-      sourceHandle: connection.sourceHandle,
-      targetHandle: connection.targetHandle,
-    });
+    // We need exactly one Port (Parent) and one Tether (Child)
+    // XOR check: (A and not B) or (not A and B)
+    const isValid = sourceIsPort ? !targetIsPort : targetIsPort;
 
-    return true;
+    // Prevent self-linking
+    if (connection.source === connection.target) return false;
+
+    return isValid;
   }, []);
 
   const onConnect = useCallback(
     async (params: Connection) => {
-      if (!params.source || !params.target || !params.sourceHandle || !params.targetHandle) {
-        console.warn('[Canvas] Invalid connection params:', params);
-        return;
-      }
+      // Identify which handle is the "Port" (The Parent's Docking Station)
+      // The Port handle will have an ID like 'anchor-top', 'anchor-left', 'anchor-right'
 
-      // Map handle IDs to connection modes
-      // Target handle determines the connection mode (where child attaches to parent)
       const handleToMode: Record<string, ConnectionMode> = {
-        'anchor-top': 'STACK',     // Stack above
-        'anchor-left': 'PREPEND',  // Play before
-        'anchor-right': 'APPEND',  // Play after
+        'anchor-top': 'STACK',
+        'anchor-left': 'PREPEND',
+        'anchor-right': 'APPEND',
       };
 
-      const connectionMode = handleToMode[params.targetHandle as HandleId];
+      let parentId: string | null = null;
+      let childId: string | null = null;
+      let connectionMode: ConnectionMode | null = null;
 
-      if (!connectionMode) {
-        console.warn('[Canvas] Invalid target handle:', params.targetHandle);
+      // Check if Target was the Port (User dragged Child -> Parent)
+      if (params.targetHandle && handleToMode[params.targetHandle]) {
+        parentId = params.target;
+        childId = params.source;
+        connectionMode = handleToMode[params.targetHandle];
+      }
+      // Check if Source was the Port (User dragged Parent -> Child)
+      else if (params.sourceHandle && handleToMode[params.sourceHandle]) {
+        parentId = params.source;
+        childId = params.target;
+        connectionMode = handleToMode[params.sourceHandle];
+      }
+
+      if (!parentId || !childId || !connectionMode) {
+        console.warn('[Canvas] Invalid connection: Could not determine Parent/Child relationship from handles.');
         return;
       }
 
-      console.log('[Canvas] Connecting:', {
-        source: params.source,
-        sourceHandle: params.sourceHandle,
-        target: params.target,
-        targetHandle: params.targetHandle,
-        connectionMode,
-      });
+      console.log(`[Canvas] Linking: Parent (${parentId}) <- [${connectionMode}] <- Child (${childId})`);
 
       try {
-        // Validate the connection first
+        // Validate
         const validation = await window.electronAPI.nodeValidateAnchor(
-          params.target, // child
-          params.source, // parent
+          childId,
+          parentId,
           connectionMode
         );
 
         if (!validation.valid) {
-          console.warn('[Canvas] Connection rejected:', validation.reason);
-          alert(`Cannot create connection: ${validation.reason}`);
+          alert(`Cannot connect: ${validation.reason}`);
           return;
         }
 
-        // Create the anchor link in the database
+        // Link in DB
         const result = await window.electronAPI.nodeLink(
-          params.target, // child
-          params.source, // parent
+          childId,
+          parentId,
           connectionMode
         );
 
         if (result.success) {
           console.log('[Canvas] Link created successfully');
-          // Reload nodes to get updated positions and edges
           await loadCanvasNodes();
         } else {
           console.error('[Canvas] Link failed:', result.error);
@@ -778,7 +783,6 @@ const CanvasView: React.FC<CanvasViewProps> = ({ projectId, canvasId, onBack }) 
               nodeTypes={nodeTypes}
               fitView
               className="bg-void"
-              connectionMode="strict"
               defaultEdgeOptions={{
                 type: 'smoothstep',
                 animated: false,
