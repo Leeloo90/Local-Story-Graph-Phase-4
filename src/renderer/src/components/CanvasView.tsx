@@ -143,8 +143,10 @@ const CanvasView: React.FC<CanvasViewProps> = ({ projectId, canvasId, onBack }) 
         id: edge.id,
         source: edge.source,
         target: edge.target,
-        type: 'smoothstep',
-        style: { stroke: '#6B7280', strokeWidth: 1 },
+        sourceHandle: edge.sourceHandle,
+        targetHandle: edge.targetHandle,
+        type: 'step',
+        style: { stroke: '#2C2C2E', strokeWidth: 2 },
         animated: false,
       }));
 
@@ -784,9 +786,9 @@ const CanvasView: React.FC<CanvasViewProps> = ({ projectId, canvasId, onBack }) 
               fitView
               className="bg-void"
               defaultEdgeOptions={{
-                type: 'smoothstep',
+                type: 'step',
                 animated: false,
-                style: { stroke: '#6366F1', strokeWidth: 2 },
+                style: { stroke: '#2C2C2E', strokeWidth: 2 },
               }}
             >
               <Background color="#2C2C2E" gap={20} size={1} />

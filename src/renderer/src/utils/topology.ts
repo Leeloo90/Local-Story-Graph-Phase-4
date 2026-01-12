@@ -96,21 +96,48 @@ export const computeAbsolutePositions = (nodes: StoryNode[]): StoryNode[] => {
 };
 
 /**
+ * Map Connection Mode to Target Handle ID
+ */
+const MODE_TO_HANDLE_ID: Record<string, string> = {
+  'STACK': 'anchor-top',
+  'PREPEND': 'anchor-left',
+  'APPEND': 'anchor-right'
+};
+
+/**
  * Get all anchor relationships as edges
- * Returns array of { source, target, connectionMode } for React Flow edges
+ * Returns array with proper handle IDs for React Flow edges
  */
 export const getAnchorEdges = (
   nodes: StoryNode[]
-): Array<{ id: string; source: string; target: string; connectionMode?: ConnectionMode }> => {
-  const edges: Array<{ id: string; source: string; target: string; connectionMode?: ConnectionMode }> = [];
+): Array<{
+  id: string;
+  source: string;
+  target: string;
+  sourceHandle: string;
+  targetHandle: string;
+  connectionMode?: ConnectionMode
+}> => {
+  const edges: Array<{
+    id: string;
+    source: string;
+    target: string;
+    sourceHandle: string;
+    targetHandle: string;
+    connectionMode?: ConnectionMode
+  }> = [];
 
   nodes.forEach((node) => {
     // Check if node has an anchor
-    if (node.anchor_id) {
+    if (node.anchor_id && node.connection_mode) {
+      const targetHandle = MODE_TO_HANDLE_ID[node.connection_mode] || 'anchor-top';
+
       edges.push({
         id: `anchor-${node.id}-${node.anchor_id}`,
-        source: node.anchor_id, // Parent
-        target: node.id, // Child
+        source: node.id, // Child (the one being anchored)
+        target: node.anchor_id, // Parent (the anchor)
+        sourceHandle: 'tether-source', // Child's output handle
+        targetHandle: targetHandle, // Parent's specific port
         connectionMode: node.connection_mode,
       });
     }
