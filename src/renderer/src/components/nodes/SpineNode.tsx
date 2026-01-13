@@ -126,6 +126,14 @@ const SpineNode: React.FC<NodeProps<ReactFlowNodeData>> = ({ data, selected }) =
         className="!w-3 !h-3 !bg-accent-purple !border-2 !border-surface-high hover:!bg-white"
         id="anchor-bottom"
       />
+
+      {/* This allows a Spine node to be dragged onto another node (becoming a child) */}
+      <Handle
+        type="source"
+        position={Position.Bottom}
+        id="tether-source"
+        className="!w-3 !h-3 !bg-white !border-2 !border-accent-purple !-bottom-1.5 !z-50 hover:!scale-125"
+      />
     </div>
   );
 };

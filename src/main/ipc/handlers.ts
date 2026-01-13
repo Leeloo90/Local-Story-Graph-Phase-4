@@ -11,7 +11,6 @@ import { extractMetadata, isSupportedMediaFile, generateCleanName, calculateEndT
 import {
   validateAnchorChain,
   validateSemanticRules,
-  calculateDriftToPreservePosition
 } from '../services/topology';
 import path from 'path';
 
@@ -530,63 +529,51 @@ export function registerIpcHandlers() {
     if (!db) throw new Error('Database not initialized');
 
     try {
-      console.log(`[Node Link] Linking ${childId} to ${parentId} via ${connectionMode} mode`);
+      // 1. Determine default drifts based on mode
+      let newDriftX = 0;
+      let newDriftY = 0;
 
-      // Fetch all nodes to build the graph
-      const allNodesArray: StoryNode[] = db.query('SELECT * FROM story_nodes');
-      const allNodes = new Map<string, StoryNode>(allNodesArray.map(n => [n.id, n]));
-
-      const childNode = allNodes.get(childId);
-      const parentNode = allNodes.get(parentId);
-
-      if (!childNode || !parentNode) {
-        return {
-          success: false,
-          error: 'Child or parent node not found',
-        };
+      // Logic: Snap to the logical position of the port
+      switch (connectionMode) {
+        case 'STACK':
+          // Stacks float above (Track + 1) and start at same time (DriftX 0)
+          newDriftX = 0;
+          newDriftY = 1;
+          break;
+        case 'PREPEND':
+          // J-Cut: Ends when parent starts.
+          // Math: Start = ParentStart - Duration + Drift.
+          // For a perfect "touching" snap, Drift should be 0.
+          newDriftX = 0;
+          newDriftY = 0;
+          break;
+        case 'APPEND':
+          // L-Cut: Starts when parent ends.
+          // Math: Start = ParentEnd + Drift.
+          // For a perfect "touching" snap, Drift should be 0.
+          newDriftX = 0;
+          newDriftY = 0;
+          break;
+        default:
+          throw new Error('Invalid Mode');
       }
 
-      // 1. Validate semantic rules
-      const semanticCheck = validateSemanticRules(childNode, parentNode, connectionMode);
-      if (!semanticCheck.valid) {
-        console.error('[Node Link] Semantic validation failed:', semanticCheck.reason);
-        return {
-          success: false,
-          error: semanticCheck.reason || 'Semantic validation failed',
-        };
-      }
-
-      // 2. Run paradox validation
-      const isSafe = validateAnchorChain(allNodes, childId, parentId);
-
-      if (!isSafe) {
-        console.error('[Node Link] Paradox detected');
-        return {
-          success: false,
-          error: 'PARADOX DETECTED: Cyclic dependency prevented.',
-        };
-      }
-
-      // 3. Calculate drift (for now, default to 0)
-      const drift = calculateDriftToPreservePosition(childNode, parentNode, connectionMode, allNodes);
-
-      // 4. Update DB - set anchor_id, connection_mode, and drift
+      // 2. Perform the Update
+      // CRITICAL: We overwrite the old "Absolute" drift values with new "Relative" ones
       db.execute(
-        `UPDATE story_nodes
-         SET anchor_id = ?, connection_mode = ?, drift_x = ?, drift_y = ?
-         WHERE id = ?`,
-        [parentId, connectionMode, drift.drift_x, drift.drift_y, childId]
+        `UPDATE story_nodes 
+        SET anchor_id = ?, 
+            connection_mode = ?, 
+            drift_x = ?, 
+            drift_y = ?
+        WHERE id = ?`,
+        [parentId, connectionMode, newDriftX, newDriftY, childId]
       );
 
-      console.log(`[Node Link] Successfully linked ${childId} to ${parentId} (${connectionMode}). Drift: (${drift.drift_x}, ${drift.drift_y})`);
-
       return { success: true };
-    } catch (error) {
-      console.error('[Node Link] Error:', error);
-      return {
-        success: false,
-        error: error instanceof Error ? error.message : 'Unknown error',
-      };
+    } catch (err: any) {
+      console.error('[IPC] Link Error:', err);
+      return { success: false, error: err.message };
     }
   });
 
