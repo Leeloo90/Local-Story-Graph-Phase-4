@@ -84,6 +84,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   nodeUpdatePosition: (id: string, x: number, y: number) =>
     ipcRenderer.invoke('node-update-position', id, x, y),
 
+  nodeUpdateDrift: (id: string, driftX: number, driftY: number) =>
+    ipcRenderer.invoke('node-update-drift', id, driftX, driftY),
+
   nodeLink: (childId: string, parentId: string, connectionMode: string) =>
     ipcRenderer.invoke('node-link', childId, parentId, connectionMode),
 
@@ -95,6 +98,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   nodeChangeType: (nodeId: string, newType: 'SPINE' | 'SATELLITE') =>
     ipcRenderer.invoke('node-change-type', nodeId, newType),
+
+  // Phase 4.2: Zone transition operations
+  nodeMoveToAttic: (nodeId: string, spineId: string) =>
+    ipcRenderer.invoke('node-move-to-attic', nodeId, spineId),
+
+  nodeMoveToBucket: (nodeId: string) =>
+    ipcRenderer.invoke('node-move-to-bucket', nodeId),
 
   // ===========================================================================
   // BACKUP OPERATIONS
@@ -144,6 +154,7 @@ declare global {
       nodeDelete: (id: string) => Promise<void>;
       nodeList: (canvasId: string) => Promise<any[]>;
       nodeUpdatePosition: (id: string, x: number, y: number) => Promise<void>;
+      nodeUpdateDrift: (id: string, driftX: number, driftY: number) => Promise<void>;
       nodeLink: (childId: string, parentId: string, connectionMode: string) => Promise<{ success: boolean; error?: string }>;
       nodeUnlink: (nodeId: string) => Promise<{ success: boolean }>;
       nodeValidateAnchor: (childId: string, parentId: string, connectionMode: string) => Promise<{ valid: boolean; reason?: string }>;

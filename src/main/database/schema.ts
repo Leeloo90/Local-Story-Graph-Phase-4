@@ -195,6 +195,10 @@ export class StoryGraphDatabase {
         drift_x REAL DEFAULT 0,
         drift_y INTEGER DEFAULT 0,
 
+        -- Attic system (Magnetic Construction v2)
+        -- Nodes in the Attic are "parked" above a Spine, not yet committed to the edit
+        attic_parent_id TEXT,
+
         -- Clip trimming (in seconds)
         clip_in REAL DEFAULT 0,
         clip_out REAL,
@@ -203,7 +207,8 @@ export class StoryGraphDatabase {
         FOREIGN KEY (asset_id) REFERENCES media_library(id) ON DELETE SET NULL,
         FOREIGN KEY (act_id) REFERENCES fractal_containers(id) ON DELETE SET NULL,
         FOREIGN KEY (scene_id) REFERENCES fractal_containers(id) ON DELETE SET NULL,
-        FOREIGN KEY (anchor_id) REFERENCES story_nodes(id) ON DELETE SET NULL
+        FOREIGN KEY (anchor_id) REFERENCES story_nodes(id) ON DELETE SET NULL,
+        FOREIGN KEY (attic_parent_id) REFERENCES story_nodes(id) ON DELETE SET NULL
       );
 
       CREATE INDEX IF NOT EXISTS idx_node_asset ON story_nodes(asset_id);
@@ -213,6 +218,7 @@ export class StoryGraphDatabase {
       CREATE INDEX IF NOT EXISTS idx_node_is_global ON story_nodes(is_global);
       CREATE INDEX IF NOT EXISTS idx_node_anchor ON story_nodes(anchor_id);
       CREATE INDEX IF NOT EXISTS idx_node_connection_mode ON story_nodes(connection_mode);
+      CREATE INDEX IF NOT EXISTS idx_node_attic_parent ON story_nodes(attic_parent_id);
     `);
 
     // ========================================================================

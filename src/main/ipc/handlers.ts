@@ -440,10 +440,88 @@ export function registerIpcHandlers() {
     console.log(`Node deleted: ${id}`);
   });
 
+  /**
+   * Smart Position Update
+   * Handles both Absolute movement (Roots) and Relative movement (Children)
+   * Phase 4: Single Anchor System with automatic drift recalculation
+   */
   ipcMain.handle('node-update-position', async (_event, id: string, x: number, y: number) => {
     if (!db) throw new Error('Database not initialized');
+
+    // Constants for calculation (must match topology.ts)
+    const PIXELS_PER_SECOND = 20;
+    const PIXELS_PER_TRACK = 120;
+
+    // 1. Get the node to see if it's anchored
+    const nodes: StoryNode[] = db.query('SELECT * FROM story_nodes WHERE id = ?', [id]);
+    const node = nodes[0];
+    if (!node) {
+      console.error(`[Pos Update] Node not found: ${id}`);
+      return;
+    }
+
+    // 2. Always update stored x, y (this is the "cache" for root nodes)
     db.execute('UPDATE story_nodes SET x = ?, y = ? WHERE id = ?', [x, y, id]);
-    console.log(`Node position updated: ${id} to (${x}, ${y})`);
+
+    // 3. If this is an anchored node, recalculate its drift
+    if (node.anchor_id) {
+      const parentNodes: StoryNode[] = db.query('SELECT * FROM story_nodes WHERE id = ?', [node.anchor_id]);
+      const parent = parentNodes[0];
+
+      if (parent) {
+        // Calculate current visual distance
+        const currentDistX = x - parent.x;
+        const currentDistY = parent.y - y; // Y is inverted
+
+        // Calculate port base offset
+        let portOffsetX = 0;
+        const childDuration = (node.clip_out || 0) - (node.clip_in || 0);
+        const parentDuration = (parent.clip_out || 0) - (parent.clip_in || 0);
+        const parentWidth = parentDuration * PIXELS_PER_SECOND;
+
+        switch (node.connection_mode) {
+          case 'STACK':
+            portOffsetX = 0;
+            break;
+          case 'PREPEND':
+            portOffsetX = -(childDuration * PIXELS_PER_SECOND);
+            break;
+          case 'APPEND':
+            portOffsetX = parentWidth;
+            break;
+        }
+
+        // Solve for new drift
+        const newDriftX = (currentDistX - portOffsetX) / PIXELS_PER_SECOND;
+        const newDriftY = Math.round(currentDistY / PIXELS_PER_TRACK);
+
+        // Update drift in database
+        db.execute(
+          'UPDATE story_nodes SET drift_x = ?, drift_y = ? WHERE id = ?',
+          [newDriftX, newDriftY, id]
+        );
+
+        console.log(`[Pos Update] Anchored node ${id} -> drift updated: driftX=${newDriftX}s, driftY=${newDriftY} tracks`);
+      } else {
+        console.warn(`[Pos Update] Parent node ${node.anchor_id} not found for anchored node ${id}`);
+      }
+    } else {
+      console.log(`[Pos Update] Root node ${id} moved to (${x}, ${y})`);
+    }
+  });
+
+  /**
+   * New Handler: Explicitly update drift
+   * Phase 4: For anchored nodes, update relative positioning
+   */
+  ipcMain.handle('node-update-drift', async (_event, id: string, driftX: number, driftY: number) => {
+    if (!db) throw new Error('Database not initialized');
+
+    db.execute(
+      'UPDATE story_nodes SET drift_x = ?, drift_y = ? WHERE id = ?',
+      [driftX, driftY, id]
+    );
+    console.log(`[Pos Update] Child drift updated: ${id} -> driftX: ${driftX}s, driftY: ${driftY} tracks`);
   });
 
   ipcMain.handle('node-list', async (_event, canvasId: string) => {
@@ -523,48 +601,69 @@ export function registerIpcHandlers() {
 
   /**
    * Link a node to a parent (create parent-child relationship)
-   * Phase 4: Single anchor system with connection modes
+   * Phase 4: Single anchor system with "Smart Initial Drift"
+   *
+   * This calculates the drift needed to PRESERVE the current visual positions,
+   * preventing the "jump" effect when linking nodes.
    */
   ipcMain.handle('node-link', async (_event, childId: string, parentId: string, connectionMode: ConnectionMode) => {
     if (!db) throw new Error('Database not initialized');
 
     try {
-      // 1. Determine default drifts based on mode
-      let newDriftX = 0;
-      let newDriftY = 0;
+      // Constants for calculation (must match topology.ts)
+      const PIXELS_PER_SECOND = 20;
+      const PIXELS_PER_TRACK = 120;
 
-      // Logic: Snap to the logical position of the port
-      switch (connectionMode) {
-        case 'STACK':
-          // Stacks float above (Track + 1) and start at same time (DriftX 0)
-          newDriftX = 0;
-          newDriftY = 1;
-          break;
-        case 'PREPEND':
-          // J-Cut: Ends when parent starts.
-          // Math: Start = ParentStart - Duration + Drift.
-          // For a perfect "touching" snap, Drift should be 0.
-          newDriftX = 0;
-          newDriftY = 0;
-          break;
-        case 'APPEND':
-          // L-Cut: Starts when parent ends.
-          // Math: Start = ParentEnd + Drift.
-          // For a perfect "touching" snap, Drift should be 0.
-          newDriftX = 0;
-          newDriftY = 0;
-          break;
-        default:
-          throw new Error('Invalid Mode');
+      // 1. Fetch both nodes
+      const nodes: StoryNode[] = db.query('SELECT * FROM story_nodes WHERE id IN (?, ?)', [childId, parentId]);
+      const child = nodes.find(n => n.id === childId);
+      const parent = nodes.find(n => n.id === parentId);
+
+      if (!child || !parent) {
+        throw new Error('Child or parent node not found');
       }
 
-      // 2. Perform the Update
-      // CRITICAL: We overwrite the old "Absolute" drift values with new "Relative" ones
+      // 2. Calculate current visual distance
+      const currentDistX = child.x - parent.x;
+      const currentDistY = parent.y - child.y; // Y is inverted (up is negative)
+
+      // 3. Calculate port base offset
+      let portOffsetX = 0;
+      const childDuration = (child.clip_out || 0) - (child.clip_in || 0);
+      const parentDuration = (parent.clip_out || 0) - (parent.clip_in || 0);
+      const parentWidth = parentDuration * PIXELS_PER_SECOND;
+
+      switch (connectionMode) {
+        case 'STACK':
+          // Top Port: Aligns with parent start
+          portOffsetX = 0;
+          break;
+        case 'PREPEND':
+          // Left Port: Child's right edge touches parent's left edge
+          portOffsetX = -(childDuration * PIXELS_PER_SECOND);
+          break;
+        case 'APPEND':
+          // Right Port: Child's left edge touches parent's right edge
+          portOffsetX = parentWidth;
+          break;
+      }
+
+      // 4. Solve for drift that preserves current position
+      // Formula: currentDistX = portOffsetX + (drift_x * PIXELS_PER_SECOND)
+      // Therefore: drift_x = (currentDistX - portOffsetX) / PIXELS_PER_SECOND
+      const newDriftX = (currentDistX - portOffsetX) / PIXELS_PER_SECOND;
+
+      // 5. Snap drift_y to nearest track
+      const newDriftY = Math.round(currentDistY / PIXELS_PER_TRACK);
+
+      console.log(`[Node Link] Smart Initial Drift calculated: driftX=${newDriftX}s, driftY=${newDriftY} tracks`);
+
+      // 6. Update database
       db.execute(
-        `UPDATE story_nodes 
-        SET anchor_id = ?, 
-            connection_mode = ?, 
-            drift_x = ?, 
+        `UPDATE story_nodes
+        SET anchor_id = ?,
+            connection_mode = ?,
+            drift_x = ?,
             drift_y = ?
         WHERE id = ?`,
         [parentId, connectionMode, newDriftX, newDriftY, childId]
@@ -662,6 +761,83 @@ export function registerIpcHandlers() {
       return { success: true };
     } catch (error) {
       console.error('[Node Change Type] Error:', error);
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Unknown error',
+      };
+    }
+  });
+
+  /**
+   * Phase 4.2: Move node to a spine's attic
+   * Removes anchor and sets attic_parent_id
+   */
+  ipcMain.handle('node-move-to-attic', async (_event, nodeId: string, spineId: string) => {
+    if (!db) throw new Error('Database not initialized');
+
+    try {
+      console.log(`[Node Move To Attic] Moving ${nodeId} to attic of spine ${spineId}`);
+
+      // Verify spine exists
+      const spines: StoryNode[] = db.query('SELECT * FROM story_nodes WHERE id = ?', [spineId]);
+      if (spines.length === 0) {
+        return {
+          success: false,
+          error: 'Spine node not found',
+        };
+      }
+
+      // Update node: remove anchor, set attic_parent_id
+      db.execute(
+        `UPDATE story_nodes
+         SET attic_parent_id = ?,
+             anchor_id = NULL,
+             connection_mode = 'STACK',
+             drift_x = 0,
+             drift_y = 0
+         WHERE id = ?`,
+        [spineId, nodeId]
+      );
+
+      console.log(`[Node Move To Attic] Successfully moved ${nodeId} to attic`);
+
+      return { success: true };
+    } catch (error) {
+      console.error('[Node Move To Attic] Error:', error);
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Unknown error',
+      };
+    }
+  });
+
+  /**
+   * Phase 4.2: Move node to bucket
+   * Removes both anchor and attic_parent_id
+   */
+  ipcMain.handle('node-move-to-bucket', async (_event, nodeId: string) => {
+    if (!db) throw new Error('Database not initialized');
+
+    try {
+      console.log(`[Node Move To Bucket] Moving ${nodeId} to bucket`);
+
+      // Update node: remove anchor and attic_parent_id
+      db.execute(
+        `UPDATE story_nodes
+         SET attic_parent_id = NULL,
+             anchor_id = NULL,
+             connection_mode = 'STACK',
+             drift_x = 0,
+             drift_y = 0
+         WHERE id = ?`,
+        [nodeId]
+      );
+
+      console.log(`[Node Move To Bucket] Successfully moved ${nodeId} to bucket`);
+
+      return { success: true };
+    } catch (error) {
+      console.error('[Node Move To Bucket] Error:', error);
       return {
         success: false,
         error: error instanceof Error ? error.message : 'Unknown error',

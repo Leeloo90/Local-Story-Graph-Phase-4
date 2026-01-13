@@ -34,6 +34,7 @@ import {
   PanelRightClose,
   PanelRightOpen,
   FileDown,
+  Archive,
 } from 'lucide-react';
 import { mockNodes } from '../data/mockData';
 import SpineNode from './nodes/SpineNode';
@@ -43,7 +44,9 @@ import TimelineView from './TimelineView';
 import InspectorPanel from './InspectorPanel';
 import MediaLibraryPanel from './MediaLibraryPanel';
 import NodeContextMenu from './NodeContextMenu';
-import { computeAbsolutePositions, getAnchorEdges } from '../utils/topology';
+import AtticContainer from './AtticContainer';
+import BucketPanel from './BucketPanel';
+import { buildGraphLayout, generateDropZones, detectDropZone, handleVoidDrop, Zone, DropZone as TopologyDropZone } from '../utils/topology-v2';
 
 interface CanvasViewProps {
   projectId: string;
@@ -92,8 +95,20 @@ const CanvasView: React.FC<CanvasViewProps> = ({ projectId, canvasId, onBack }) 
   const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
 
   // State for nodes and edges
-  const [nodes, setNodes, onNodesChange] = useNodesState([]);
+  const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
+  const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
   const [mediaAssets, setMediaAssets] = useState<Map<string, MediaAsset>>(new Map());
+
+  // Phase 4.1: Drop zones for magnetic snapping
+  const [dropZones, setDropZones] = useState<TopologyDropZone[]>([]);
+  const [activeDropZone, setActiveDropZone] = useState<TopologyDropZone | null>(null);
+  const [isDraggingMedia, setIsDraggingMedia] = useState(false);
+  const [dragPosition, setDragPosition] = useState<{ x: number; y: number } | null>(null);
+
+  // Phase 4.2: Attic and bucket state
+  const [atticItems, setAtticItems] = useState<Map<string, StoryNodeType[]>>(new Map()); // spineId -> attic items
+  const [bucketItems, setBucketItems] = useState<StoryNodeType[]>([]);
+  const [isBucketOpen, setIsBucketOpen] = useState(false);
 
   // Context menu state
   const [contextMenu, setContextMenu] = useState<{
@@ -117,42 +132,44 @@ const CanvasView: React.FC<CanvasViewProps> = ({ projectId, canvasId, onBack }) 
       console.log('[Canvas] Loading nodes for canvas:', canvasId);
       const storyNodes: StoryNodeType[] = await window.electronAPI.nodeList(canvasId);
 
-      // Phase 4: Compute absolute positions from anchor chains
-      const nodesWithComputed = computeAbsolutePositions(storyNodes);
+      // Phase 4.2: Separate nodes by zone
+      const assemblyNodes = storyNodes.filter(n => n.anchor_id || (!n.anchor_id && !n.attic_parent_id));
+      const atticNodes = storyNodes.filter(n => n.attic_parent_id);
+      const bucketNodes = storyNodes.filter(n => !n.anchor_id && !n.attic_parent_id && n.type !== 'SPINE');
 
-      // Convert StoryNode[] to React Flow Node[]
-      const flowNodes: Node[] = nodesWithComputed.map((sn) => ({
-        id: sn.id,
-        type: sn.subtype === 'MUSIC' || sn.type === 'SATELLITE' ? 'satellite' : 'spine',
-        position: {
-          x: sn._computed?.absoluteX ?? sn.x,
-          y: sn._computed?.absoluteY ?? sn.y,
-        },
+      // Phase 4.1: Use topology-v2 flat layout algorithm (only for assembly nodes)
+      const { nodes: layoutNodes, edges: layoutEdges } = buildGraphLayout(assemblyNodes);
+
+      // Convert LayoutNode[] to React Flow Node[]
+      const flowNodes: Node[] = layoutNodes.map((ln) => ({
+        id: ln.id,
+        type: ln.data.storyNode.type === 'SPINE' ? 'spine' : 'satellite',
+        position: ln.position,
         data: {
-          storyNode: sn,
-          label: `Node ${sn.id.substring(0, 8)}`,
+          storyNode: ln.data.storyNode,
+          label: ln.data.label,
           onDelete: handleDeleteNode,
+          zone: ln.zone, // Track which zone this node is in
         },
       }));
 
       setNodes(flowNodes);
+      setEdges(layoutEdges);
 
-      // Phase 4: Generate anchor edges for visualization
-      const anchorEdges = getAnchorEdges(nodesWithComputed);
-      const flowEdges: Edge[] = anchorEdges.map((edge) => ({
-        id: edge.id,
-        source: edge.source,
-        target: edge.target,
-        sourceHandle: edge.sourceHandle,
-        targetHandle: edge.targetHandle,
-        type: 'step',
-        style: { stroke: '#2C2C2E', strokeWidth: 2 },
-        animated: false,
-      }));
+      // Phase 4.2: Group attic nodes by spine
+      const atticBySpine = new Map<string, StoryNodeType[]>();
+      atticNodes.forEach(node => {
+        if (node.attic_parent_id) {
+          const existing = atticBySpine.get(node.attic_parent_id) || [];
+          atticBySpine.set(node.attic_parent_id, [...existing, node]);
+        }
+      });
+      setAtticItems(atticBySpine);
 
-      setEdges(flowEdges);
+      // Phase 4.2: Set bucket items
+      setBucketItems(bucketNodes);
 
-      console.log('[Canvas] Loaded', flowNodes.length, 'nodes and', flowEdges.length, 'anchor edges');
+      console.log('[Canvas] Loaded', flowNodes.length, 'assembly nodes,', atticNodes.length, 'attic nodes,', bucketNodes.length, 'bucket nodes');
     } catch (error) {
       console.error('[Canvas] Failed to load nodes:', error);
     }
@@ -174,12 +191,38 @@ const CanvasView: React.FC<CanvasViewProps> = ({ projectId, canvasId, onBack }) 
   const handleDragOver: OnDragOver = useCallback((event) => {
     event.preventDefault();
     event.dataTransfer.dropEffect = 'copy';
+
+    // Phase 4.1: Track drag position for drop zone highlighting
+    const reactFlowBounds = (event.target as HTMLElement).closest('.react-flow')?.getBoundingClientRect();
+    if (reactFlowBounds) {
+      const x = event.clientX - reactFlowBounds.left;
+      const y = event.clientY - reactFlowBounds.top;
+
+      setDragPosition({ x, y });
+      setIsDraggingMedia(true);
+
+      // Detect active drop zone
+      const zone = detectDropZone(x, y, dropZones);
+      setActiveDropZone(zone);
+    }
+  }, [dropZones]);
+
+  // Handle drag leave - clear drag state
+  const handleDragLeave = useCallback(() => {
+    setIsDraggingMedia(false);
+    setDragPosition(null);
+    setActiveDropZone(null);
   }, []);
 
   // Handle drop on canvas
   const handleDrop: OnDrop = useCallback(
     async (event) => {
       event.preventDefault();
+
+      // Phase 4.1: Clear drag state
+      setIsDraggingMedia(false);
+      setDragPosition(null);
+      setActiveDropZone(null);
 
       const data = event.dataTransfer.getData('application/media-asset');
       if (!data) {
@@ -204,47 +247,180 @@ const CanvasView: React.FC<CanvasViewProps> = ({ projectId, canvasId, onBack }) 
 
         console.log('[Canvas Drop] Position:', { x, y });
 
+        // Phase 4.1: Check if this is the first node (ROOT exception)
+        const existingNodes = await window.electronAPI.nodeList(canvasId);
+        const hasRoot = existingNodes.some((n: StoryNodeType) => !n.anchor_id && !n.attic_parent_id);
+
         // Determine node type based on media_type
         const nodeType = asset.media_type === 'DIALOGUE' ? 'SPINE' : 'SATELLITE';
         const subtype = asset.media_type === 'MUSIC' ? 'MUSIC' : 'VIDEO';
 
-        // Create StoryNode in database
-        const newStoryNode: Omit<StoryNodeType, 'id'> = {
-          asset_id: asset.id,
-          type: nodeType,
-          subtype: subtype as 'VIDEO' | 'MUSIC' | 'TEXT' | 'IMAGE',
-          is_global: false,
-          x,
-          y,
-          width: 240,
-          height: 180,
-        };
+        if (!hasRoot) {
+          // Phase 4.1: First node becomes ROOT
+          console.log('[Canvas Drop] Creating ROOT node at fixed position');
 
-        const createdNode: StoryNodeType = await window.electronAPI.nodeCreate(canvasId, newStoryNode);
-        console.log('[Canvas Drop] Created node:', createdNode.id);
+          const rootNode: Omit<StoryNodeType, 'id'> = {
+            asset_id: asset.id,
+            type: 'SPINE', // First node is always SPINE
+            subtype: subtype as 'VIDEO' | 'MUSIC' | 'TEXT' | 'IMAGE',
+            is_global: false,
+            x: 100, // CANVAS_START_X from topology-v2
+            y: 400, // CANVAS_CENTER_Y from topology-v2
+            width: 300,
+            height: 150,
+            // ROOT has no anchor or attic parent (undefined, not null)
+          };
 
-        // Add to React Flow
-        const newFlowNode: Node = {
-          id: createdNode.id,
-          type: nodeType === 'SPINE' ? 'spine' : 'satellite',
-          position: { x: createdNode.x, y: createdNode.y },
-          data: {
-            storyNode: createdNode,
-            asset: asset,
-            label: asset.clean_name,
-            onDelete: handleDeleteNode,
-          },
-        };
+          const createdNode = await window.electronAPI.nodeCreate(canvasId, rootNode);
+          console.log('[Canvas Drop] ROOT node created:', createdNode.id);
 
-        setNodes((nds) => [...nds, newFlowNode]);
+          // Reload canvas to show ROOT node with proper layout
+          await loadCanvasNodes();
+        } else {
+          // Phase 4.1: Subsequent nodes - check drop zones or void
+          console.log('[Canvas Drop] Checking drop zones for position:', { x, y });
 
-        console.log('[Canvas Drop] Node added to canvas');
+          // Detect if dropped on a drop zone
+          const zone = detectDropZone(x, y, dropZones);
+
+          if (zone) {
+            console.log('[Canvas Drop] Dropped on zone:', zone.type, 'for node:', zone.nodeId);
+
+            // Phase 4.1: Handle attic separately (not a ConnectionMode)
+            if (zone.type === 'attic') {
+              // Create node in the spine's attic (no anchor)
+              console.log('[Canvas Drop] Creating attic node under spine:', zone.nodeId);
+              const atticNode: Omit<StoryNodeType, 'id'> = {
+                asset_id: asset.id,
+                type: nodeType,
+                subtype: subtype as 'VIDEO' | 'MUSIC' | 'TEXT' | 'IMAGE',
+                is_global: false,
+                x: 0,
+                y: 0,
+                width: 180,
+                height: 60,
+                attic_parent_id: zone.nodeId,
+              };
+
+              await window.electronAPI.nodeCreate(canvasId, atticNode);
+              console.log('[Canvas Drop] Attic node created');
+              await loadCanvasNodes();
+            } else {
+              // Phase 4.1: Map zone type to connection mode for anchor creation
+              const zoneToMode: Record<string, ConnectionMode> = {
+                'left': 'PREPEND',
+                'right': 'APPEND',
+                'top': 'STACK',
+              };
+
+              const connectionMode = zoneToMode[zone.type];
+
+              if (!connectionMode) {
+                console.error('[Canvas Drop] Unknown zone type:', zone.type);
+                return;
+              }
+
+              // Create anchored node
+              console.log('[Canvas Drop] Creating anchored node:', connectionMode, 'to', zone.nodeId);
+
+              // Step 1: Create the node (unanchored initially)
+              const newNode: Omit<StoryNodeType, 'id'> = {
+                asset_id: asset.id,
+                type: nodeType,
+                subtype: subtype as 'VIDEO' | 'MUSIC' | 'TEXT' | 'IMAGE',
+                is_global: false,
+                x: 0,
+                y: 0,
+                width: nodeType === 'SPINE' ? 300 : 240,
+                height: nodeType === 'SPINE' ? 150 : 180,
+              };
+
+              const createdNode = await window.electronAPI.nodeCreate(canvasId, newNode);
+              console.log('[Canvas Drop] Node created:', createdNode.id);
+
+              // Step 2: Validate the anchor relationship
+              const validation = await window.electronAPI.nodeValidateAnchor(
+                createdNode.id,
+                zone.nodeId,
+                connectionMode
+              );
+
+              if (!validation.valid) {
+                console.error('[Canvas Drop] Anchor validation failed:', validation.reason);
+                alert(`Cannot create link: ${validation.reason}`);
+                // Delete the node since we can't anchor it
+                await window.electronAPI.nodeDelete(createdNode.id);
+                return;
+              }
+
+              // Step 3: Create the anchor link
+              const linkResult = await window.electronAPI.nodeLink(
+                createdNode.id,
+                zone.nodeId,
+                connectionMode
+              );
+
+              if (linkResult.success) {
+                console.log('[Canvas Drop] Anchor created successfully');
+                await loadCanvasNodes();
+              } else {
+                console.error('[Canvas Drop] Failed to create anchor:', linkResult.error);
+                alert(`Failed to create anchor: ${linkResult.error}`);
+                // Delete the node since we can't anchor it
+                await window.electronAPI.nodeDelete(createdNode.id);
+              }
+            }
+          } else {
+            // Phase 4.1: Smart void logic
+            const layoutNodes = nodes.filter(n => n.data.zone === Zone.ASSEMBLY);
+            const destination = handleVoidDrop(x, layoutNodes as any);
+
+            if (destination === 'bucket') {
+              console.log('[Canvas Drop] Dropped in void (>300px from any spine) → Bucket');
+              // Create node in bucket (no anchor, no attic)
+              const bucketNode: Omit<StoryNodeType, 'id'> = {
+                asset_id: asset.id,
+                type: nodeType,
+                subtype: subtype as 'VIDEO' | 'MUSIC' | 'TEXT' | 'IMAGE',
+                is_global: false,
+                x: 0,
+                y: 0,
+                width: 240,
+                height: 180,
+                // No anchor_id or attic_parent_id (undefined)
+              };
+
+              await window.electronAPI.nodeCreate(canvasId, bucketNode);
+              console.log('[Canvas Drop] Node created in bucket');
+              await loadCanvasNodes();
+            } else {
+              console.log('[Canvas Drop] Dropped near spine:', destination, '→ Attic');
+              // Create node in attic of nearest spine
+              const atticNode: Omit<StoryNodeType, 'id'> = {
+                asset_id: asset.id,
+                type: nodeType,
+                subtype: subtype as 'VIDEO' | 'MUSIC' | 'TEXT' | 'IMAGE',
+                is_global: false,
+                x: 0,
+                y: 0,
+                width: 180,
+                height: 60,
+                attic_parent_id: destination, // Park in this spine's attic
+                // No anchor_id (undefined)
+              };
+
+              await window.electronAPI.nodeCreate(canvasId, atticNode);
+              console.log('[Canvas Drop] Node created in attic of spine:', destination);
+              await loadCanvasNodes();
+            }
+          }
+        }
       } catch (error) {
         console.error('[Canvas Drop] Failed to create node:', error);
         alert('Failed to create node. Check console for details.');
       }
     },
-    [canvasId, setNodes]
+    [canvasId, dropZones, nodes, loadCanvasNodes]
   );
 
   // Handle node deletion
@@ -331,17 +507,25 @@ const CanvasView: React.FC<CanvasViewProps> = ({ projectId, canvasId, onBack }) 
   );
 
   // Handle node position change (persist to database)
+  // Phase 4: Smart position update - backend automatically handles drift calculation
   const handleNodeDragStop = useCallback(
     async (_event: React.MouseEvent, node: Node) => {
       try {
         console.log('[Canvas] Node dragged to:', node.position);
+
+        // Send position to backend - it will automatically:
+        // - Update x, y for all nodes
+        // - Recalculate drift for anchored nodes
         await window.electronAPI.nodeUpdatePosition(node.id, node.position.x, node.position.y);
-        console.log('[Canvas] Node position updated in database');
+
+        // Refresh canvas to show calculated positions
+        await loadCanvasNodes();
+
       } catch (error) {
         console.error('[Canvas] Failed to update node position:', error);
       }
     },
-    []
+    [loadCanvasNodes]
   );
 
   // Update nodes when bucket visibility changes
@@ -377,22 +561,30 @@ const CanvasView: React.FC<CanvasViewProps> = ({ projectId, canvasId, onBack }) 
       setNodes((nds) => nds.filter((n) => n.id !== 'bucket'));
     }
   }, [showBucket, setNodes]);
-  const [edges, setEdges, onEdgesChange] = useEdgesState([]);
 
-  // Validate connections - allow any handle to connect to any handle
-  const isValidConnection = useCallback((connection: Connection) => {
-    const validPorts = ['anchor-top', 'anchor-left', 'anchor-right'];
-    const sourceIsPort = validPorts.includes(connection.sourceHandle || '');
-    const targetIsPort = validPorts.includes(connection.targetHandle || '');
+  // Phase 4.1: Generate drop zones when layout changes
+  useEffect(() => {
+    const layoutNodes = nodes
+      .map(n => ({
+        ...n,
+        x: n.position.x,
+        y: n.position.y,
+        width: n.width || 300,
+        height: n.height || 150,
+        zone: n.data.zone || Zone.ASSEMBLY,
+        data: n.data
+      }))
+      .filter(n => n.data.zone === Zone.ASSEMBLY); // Only assembly nodes have drop zones
 
-    // We need exactly one Port (Parent) and one Tether (Child)
-    // XOR check: (A and not B) or (not A and B)
-    const isValid = sourceIsPort ? !targetIsPort : targetIsPort;
+    const zones = generateDropZones(layoutNodes as any);
+    setDropZones(zones);
+  }, [nodes]);
 
-    // Prevent self-linking
-    if (connection.source === connection.target) return false;
-
-    return isValid;
+  // Phase 4.1: Disable wire dragging - use drop zones instead
+  const isValidConnection = useCallback((_connection: Connection | Edge) => {
+    // Phase 4.1: Block all wire dragging
+    // Connections are made through drop-to-snap interaction instead
+    return false;
   }, []);
 
   const onConnect = useCallback(
@@ -690,6 +882,20 @@ const CanvasView: React.FC<CanvasViewProps> = ({ projectId, canvasId, onBack }) 
 
           <div className="w-px h-6 bg-void-gray" />
 
+          {/* Phase 4.2: Bucket Toggle */}
+          <button
+            onClick={() => setIsBucketOpen(!isBucketOpen)}
+            className={`btn-ghost text-sm flex items-center gap-2 ${
+              isBucketOpen ? 'text-accent-cyan' : ''
+            }`}
+            title="Toggle Bucket"
+          >
+            <Archive size={16} />
+            Bucket ({bucketItems.length})
+          </button>
+
+          <div className="w-px h-6 bg-void-gray" />
+
           <button
             onClick={() => console.log('[MOCK] Zoom to Extents')}
             className="btn-ghost text-sm flex items-center gap-2"
@@ -780,6 +986,7 @@ const CanvasView: React.FC<CanvasViewProps> = ({ projectId, canvasId, onBack }) 
               isValidConnection={isValidConnection}
               onDrop={handleDrop}
               onDragOver={handleDragOver}
+              onDragLeave={handleDragLeave}
               onNodeDragStop={handleNodeDragStop}
               onNodeContextMenu={handleNodeContextMenu}
               nodeTypes={nodeTypes}
@@ -813,6 +1020,31 @@ const CanvasView: React.FC<CanvasViewProps> = ({ projectId, canvasId, onBack }) 
                 }}
               />
             </ReactFlow>
+
+            {/* Phase 4.1: Drop Zone Visual Feedback */}
+            {isDraggingMedia && dropZones.map(zone => (
+              <div
+                key={`dropzone-${zone.nodeId}-${zone.type}`}
+                className={`absolute pointer-events-none transition-all duration-150 ${
+                  activeDropZone?.nodeId === zone.nodeId && activeDropZone?.type === zone.type
+                    ? 'border-2 border-accent-indigo bg-accent-indigo/20 animate-pulse'
+                    : 'border-2 border-dashed border-void-gray/50 bg-void-gray/10'
+                }`}
+                style={{
+                  left: zone.bounds.x,
+                  top: zone.bounds.y,
+                  width: zone.bounds.width,
+                  height: zone.bounds.height,
+                  zIndex: 50,
+                }}
+              >
+                {activeDropZone?.nodeId === zone.nodeId && activeDropZone?.type === zone.type && (
+                  <span className="absolute top-1 left-1 text-xs text-accent-indigo font-semibold px-2 py-1 bg-void-dark/80 rounded">
+                    {zone.type.toUpperCase()}
+                  </span>
+                )}
+              </div>
+            ))}
 
             {/* Floating Preview Box */}
             {showPreview && !timelineFullscreen && (

@@ -94,6 +94,10 @@ export interface StoryNode {
   drift_x?: number; // REAL: Temporal offset in seconds
   drift_y?: number; // INTEGER: Track offset (0 = same track, +1 = above, -1 = below)
 
+  // Attic system (Magnetic Construction v2)
+  // Nodes in the Attic are "parked" above a Spine, not yet committed to the edit
+  attic_parent_id?: string; // FK to story_nodes (the Spine this node is parked under)
+
   // Clip trimming (in seconds)
   clip_in?: number; // Trim start (seconds from asset start)
   clip_out?: number; // Trim end (seconds from asset start), null = use full duration
