@@ -1,14 +1,40 @@
 /**
  * Topology Utilities (Renderer)
  * Client-side position calculations for anchor chains
- * Phase 4: Single Anchor System with Connection Modes - RUNTIME MATH
+ * Phase 4: Story Graph Physics Engine
+ *
+ * Implements the "Laws of Physics" for Story Graph:
+ * - Snowplow Effect: Adding nodes pushes timeline RIGHT
+ * - Vacuum Effect: Removing nodes pulls timeline LEFT (or DOWN for stacks)
+ * - Zero is Absolute: Nothing moves LEFT during insertion; the world moves RIGHT
+ * - Manual Width is Impossible: Nodes have fixed dimensions
+ * - Elastic Width is Automatic: A node's "territory" expands based on child tree horizontal extent
  */
 
-import { StoryNode, ConnectionMode } from '../../../shared/types';
+import { StoryNode } from '../../../shared/types';
 
-// Constants for layout - Must match your CSS/Component sizing
-export const PIXELS_PER_SECOND = 20; // 1 sec = 20px
-export const PIXELS_PER_TRACK = 120; // Vertical spacing between tracks
+// =============================================================================
+// LAYOUT CONSTANTS (per Physics Spec v11.0)
+// =============================================================================
+
+export const BASE_WIDTH_PX = 200;           // Default node width if no duration set
+export const PIXELS_PER_SECOND = 20;        // Duration-based width calculation
+export const SPINE_GAP = 100;               // Gap between Spine nodes (horizontal chain)
+export const SATELLITE_GAP = 50;            // Gap between Satellite wings (PREPEND/APPEND)
+export const STACK_GAP = 50;                // Vertical gap between stacked nodes
+export const PIXELS_PER_TRACK = 120;        // Vertical spacing per track (drift_y)
+
+// Legacy constants (kept for backward compatibility)
+export const HORIZONTAL_SPACING = SATELLITE_GAP;
+export const COUPLER_GAP = 10;
+
+// Fixed node heights
+export const SPINE_HEIGHT = 130;
+export const SATELLITE_HEIGHT = 180;
+
+// =============================================================================
+// UTILITY FUNCTIONS
+// =============================================================================
 
 /**
  * Build a Map for fast node lookups
@@ -25,154 +51,382 @@ export const calculateDuration = (node: StoryNode): number => {
   const clipOut = node.clip_out;
 
   if (clipOut !== undefined && clipOut !== null) {
-    return clipOut - clipIn;
+    return Math.max(0, clipOut - clipIn);
   }
 
-  // If no clip_out, we can't determine duration yet
-  return 0;
+  // Fallback for new nodes without set duration
+  return 5.0;
 };
 
 /**
- * RECURSIVE POSITION CALCULATION
- * Walks up the tree to find the absolute position based on anchors
+ * PASS 1: Calculate Base Widths
+ * Node width is based on duration (or minimum BASE_WIDTH_PX)
  */
-export const calculateAbsolutePosition = (
+const calculateBaseWidth = (node: StoryNode): number => {
+  const duration = calculateDuration(node);
+  return Math.max(BASE_WIDTH_PX, duration * PIXELS_PER_SECOND);
+};
+
+/**
+ * Get the appropriate gap based on node types
+ * Spine-to-Spine: 100px
+ * Satellite wings: 50px
+ */
+const getGapForConnection = (parentType: string, childType: string, mode: string): number => {
+  if (mode === 'STACK') return STACK_GAP;
+  if (parentType === 'SPINE' && childType === 'SPINE') return SPINE_GAP;
+  return SATELLITE_GAP;
+};
+
+// =============================================================================
+// COLUMN WIDTH CALCULATION (The Umbrella Effect)
+// =============================================================================
+
+/**
+ * Calculate the "Column Width" for a node
+ * This is the territory a node reserves, including all PREPEND/APPEND children
+ * of its stacked children (but not the stacked children themselves - they're above)
+ *
+ * The column width is used for:
+ * 1. Elastic stretching of the node's visual width
+ * 2. Determining how much space this node's "column" takes on the timeline
+ */
+const calculateColumnWidth = (
   node: StoryNode,
-  nodeMap: Map<string, StoryNode>,
+  allNodes: StoryNode[],
+  baseWidths: Map<string, number>,
+  columnWidths: Map<string, number>,
   visited: Set<string> = new Set()
-): { x: number; y: number } => {
-  // Cycle detection
+): number => {
   if (visited.has(node.id)) {
-    console.error('[Topology] Cycle detected while calculating position for node:', node.id);
-    return { x: node.x, y: node.y }; // Fallback to stored position
+    return columnWidths.get(node.id) || baseWidths.get(node.id) || BASE_WIDTH_PX;
   }
   visited.add(node.id);
 
-  // Base Case: If no anchor, use the stored absolute coordinates (Root Node)
+  const baseWidth = baseWidths.get(node.id) || BASE_WIDTH_PX;
+
+  // Find all stacked children (vertical tree above this node)
+  const stackedChildren = allNodes.filter(
+    n => n.anchor_id === node.id && n.connection_mode === 'STACK'
+  );
+
+  // First, recursively calculate column widths for all stacked children
+  stackedChildren.forEach(child => {
+    if (!columnWidths.has(child.id)) {
+      calculateColumnWidth(child, allNodes, baseWidths, columnWidths, new Set(visited));
+    }
+  });
+
+  // Now calculate the horizontal extent of this node's tree
+  // This includes PREPEND/APPEND children of stacked children
+  let leftExtent = 0;
+  let rightExtent = baseWidth;
+
+  stackedChildren.forEach(child => {
+    const childColumnWidth = columnWidths.get(child.id) || baseWidths.get(child.id) || BASE_WIDTH_PX;
+    const driftX = child.drift_x || 0;
+    const childOffset = driftX * PIXELS_PER_SECOND;
+
+    // Find PREPEND children of this stacked child
+    const prependChildren = allNodes.filter(
+      n => n.anchor_id === child.id && n.connection_mode === 'PREPEND'
+    );
+
+    // Find APPEND children of this stacked child
+    const appendChildren = allNodes.filter(
+      n => n.anchor_id === child.id && n.connection_mode === 'APPEND'
+    );
+
+    // Calculate left extent from PREPEND children
+    let prependWidth = 0;
+    prependChildren.forEach(prepend => {
+      const prependColumnWidth = columnWidths.get(prepend.id) || baseWidths.get(prepend.id) || BASE_WIDTH_PX;
+      prependWidth += prependColumnWidth + SATELLITE_GAP;
+    });
+
+    // Calculate right extent from APPEND children
+    let appendWidth = 0;
+    appendChildren.forEach(append => {
+      const appendColumnWidth = columnWidths.get(append.id) || baseWidths.get(append.id) || BASE_WIDTH_PX;
+      appendWidth += appendColumnWidth + SATELLITE_GAP;
+    });
+
+    // The stacked child's tree starts at childOffset and extends:
+    // - Left by prependWidth
+    // - Right by childColumnWidth + appendWidth
+    const childLeftEdge = childOffset - prependWidth;
+    const childRightEdge = childOffset + childColumnWidth + appendWidth;
+
+    leftExtent = Math.min(leftExtent, childLeftEdge);
+    rightExtent = Math.max(rightExtent, childRightEdge);
+  });
+
+  // Column width is the span from leftmost to rightmost extent
+  const columnWidth = Math.max(baseWidth, rightExtent - leftExtent);
+  columnWidths.set(node.id, columnWidth);
+
+  return columnWidth;
+};
+
+/**
+ * Calculate the left offset for a node
+ * This is how much the node's content area shifts right to accommodate PREPEND children
+ */
+const calculateLeftOffset = (
+  node: StoryNode,
+  allNodes: StoryNode[],
+  baseWidths: Map<string, number>,
+  columnWidths: Map<string, number>
+): number => {
+  const stackedChildren = allNodes.filter(
+    n => n.anchor_id === node.id && n.connection_mode === 'STACK'
+  );
+
+  let maxLeftExtent = 0;
+
+  stackedChildren.forEach(child => {
+    const driftX = child.drift_x || 0;
+    const childOffset = driftX * PIXELS_PER_SECOND;
+
+    // Find PREPEND children of this stacked child
+    const prependChildren = allNodes.filter(
+      n => n.anchor_id === child.id && n.connection_mode === 'PREPEND'
+    );
+
+    let prependWidth = 0;
+    prependChildren.forEach(prepend => {
+      const prependColumnWidth = columnWidths.get(prepend.id) || baseWidths.get(prepend.id) || BASE_WIDTH_PX;
+      prependWidth += prependColumnWidth + SATELLITE_GAP;
+    });
+
+    const childLeftEdge = childOffset - prependWidth;
+    maxLeftExtent = Math.min(maxLeftExtent, childLeftEdge);
+  });
+
+  return maxLeftExtent < 0 ? Math.abs(maxLeftExtent) : 0;
+};
+
+// =============================================================================
+// POSITION CALCULATION
+// =============================================================================
+
+/**
+ * PASS 3: Calculate absolute positions for all nodes
+ * Implements the positioning rules from the Physics Spec
+ */
+const calculatePosition = (
+  node: StoryNode,
+  nodeMap: Map<string, StoryNode>,
+  columnWidths: Map<string, number>,
+  leftOffsets: Map<string, number>,
+  visited: Set<string> = new Set()
+): { x: number; y: number } => {
+  if (visited.has(node.id)) {
+    console.error('[Topology] Cycle detected for node:', node.id);
+    return { x: node.x, y: node.y };
+  }
+  visited.add(node.id);
+
+  // Root nodes: Use their stored position (Origin Spine at x=0, y=0)
   if (!node.anchor_id) {
     return { x: node.x, y: node.y };
   }
 
-  // Recursive Step: Get Parent's calculated position
   const parent = nodeMap.get(node.anchor_id);
   if (!parent) {
-    console.warn(`[Topology] Orphaned node ${node.id}: Parent ${node.anchor_id} not found.`);
-    return { x: node.x, y: node.y }; // Fallback to absolute
+    console.warn(`[Topology] Orphaned node ${node.id}: Parent ${node.anchor_id} not found`);
+    return { x: node.x, y: node.y };
   }
 
-  const parentPos = calculateAbsolutePosition(parent, nodeMap, visited);
-  const parentDuration = calculateDuration(parent);
-  const parentWidth = parentDuration * PIXELS_PER_SECOND;
+  // Recursively get parent position
+  const parentPos = calculatePosition(parent, nodeMap, columnWidths, leftOffsets, visited);
+  const parentColumnWidth = columnWidths.get(parent.id) || BASE_WIDTH_PX;
+  const parentLeftOffset = leftOffsets.get(parent.id) || 0;
+  const nodeColumnWidth = columnWidths.get(node.id) || BASE_WIDTH_PX;
+  const nodeHeight = node.height || (node.type === 'SPINE' ? SPINE_HEIGHT : SATELLITE_HEIGHT);
 
-  // Calculate Offset based on Connection Mode
-  let offsetX = 0;
-  let offsetY = 0;
+  let x = parentPos.x;
+  let y = parentPos.y;
 
-  // 1. Add the Base Offset (Where the port is)
   switch (node.connection_mode) {
     case 'STACK':
-      // Top Port: Align with start of parent
-      offsetX = 0;
-      // Stack usually implies a track above.
-      // NOTE: drift_y controls the track offset, but visually we might want a default gap.
+      // Stacked above parent, using drift_x for horizontal offset
+      // Add parent's leftOffset so stacked children align with visual content
+      x = parentPos.x + (node.drift_x || 0) * PIXELS_PER_SECOND + parentLeftOffset;
+      y = parentPos.y - nodeHeight - STACK_GAP;
       break;
+
     case 'PREPEND':
-      // Left Port: Ends where parent starts
-      // We subtract our own width (calculated via duration) to align right-edge to left-edge
-      const myDuration = calculateDuration(node);
-      offsetX = -(myDuration * PIXELS_PER_SECOND);
+      // Left of parent, using gap based on node types
+      const prependGap = getGapForConnection(parent.type, node.type, 'PREPEND');
+      x = parentPos.x + parentLeftOffset - nodeColumnWidth - prependGap;
+      y = parentPos.y; // Same vertical level
       break;
+
     case 'APPEND':
-      // Right Port: Starts where parent ends
-      offsetX = parentWidth;
+      // Right of parent (after parent's full column width)
+      const appendGap = getGapForConnection(parent.type, node.type, 'APPEND');
+      x = parentPos.x + parentColumnWidth + appendGap;
+      y = parentPos.y; // Same vertical level
       break;
+
+    default:
+      console.warn(`[Topology] Unknown connection mode: ${node.connection_mode}`);
   }
 
-  // 2. Add the stored Drift (User adjustments)
-  // drift_x is in seconds, so we scale it.
-  offsetX += ((node.drift_x || 0) * PIXELS_PER_SECOND);
+  // Apply vertical drift (track offset)
+  if (node.drift_y) {
+    y -= node.drift_y * PIXELS_PER_TRACK;
+  }
 
-  // drift_y is track index.
-  offsetY += ((node.drift_y || 0) * PIXELS_PER_TRACK);
-
-  // Connection Mode 'STACK' usually forces at least 1 track up implicitly,
-  // but let's rely on drift_y = 1 from the DB default.
-
-  return {
-    x: parentPos.x + offsetX,
-    y: parentPos.y - offsetY // React Flow Y is positive downwards. Subtract to go UP.
-  };
+  return { x, y };
 };
 
+// =============================================================================
+// ATTACHED CHILDREN CALCULATION (for Dynamic Handles)
+// =============================================================================
+
 /**
- * Calculate generation (depth) in anchor chain
+ * Calculate relX positions for stacked children (for dynamic handle placement)
  */
-export const calculateGeneration = (
-  node: StoryNode,
-  nodeMap: Map<string, StoryNode>
-): number => {
-  let generation = 0;
-  let currentNode: StoryNode | undefined = node;
-  const visited = new Set<string>();
+const calculateAttachedChildren = (
+  parentId: string,
+  nodes: StoryNode[],
+  columnWidths: Map<string, number>
+): Array<{ id: string; relX: number }> => {
+  const parentWidth = columnWidths.get(parentId) || BASE_WIDTH_PX;
 
-  while (currentNode && currentNode.anchor_id) {
-    if (visited.has(currentNode.id)) {
-      console.error('[Topology] Cycle detected while calculating generation');
-      break;
-    }
-    visited.add(currentNode.id);
+  const stackedChildren = nodes.filter(
+    n => n.anchor_id === parentId && n.connection_mode === 'STACK'
+  );
 
-    const parentNode = nodeMap.get(currentNode.anchor_id);
-    if (!parentNode) break;
-
-    generation++;
-    currentNode = parentNode;
-  }
-
-  return generation;
+  return stackedChildren.map(child => {
+    const driftX = child.drift_x || 0;
+    const pixelOffset = driftX * PIXELS_PER_SECOND;
+    // relX is percentage (0-100) along the parent's top edge
+    const relX = (pixelOffset / parentWidth) * 100;
+    return { id: child.id, relX: Math.max(0, Math.min(100, relX)) };
+  });
 };
 
+// =============================================================================
+// MAIN COMPUTATION FUNCTION
+// =============================================================================
+
 /**
- * Compute absolute positions and generation for all nodes
- * Adds _computed field with calculated values
+ * Main Topology Computation - Multi-Pass Layout Engine
+ *
+ * Pass 1: Calculate base widths (from duration)
+ * Pass 2: Calculate column widths (umbrella effect - tree extent)
+ * Pass 3: Calculate positions (snowplow/vacuum physics)
  */
 export const computeAbsolutePositions = (nodes: StoryNode[]): StoryNode[] => {
+  if (nodes.length === 0) return [];
+
   const nodeMap = buildNodeMap(nodes);
 
-  return nodes.map((node) => {
-    // This recurses up to the root for every node
-    const { x, y } = calculateAbsolutePosition(node, nodeMap);
-    const generation = calculateGeneration(node, nodeMap);
+  // PASS 1: Calculate base widths
+  const baseWidths = new Map<string, number>();
+  nodes.forEach(node => {
+    baseWidths.set(node.id, calculateBaseWidth(node));
+  });
+
+  // PASS 2: Calculate column widths (recursive, bottom-up)
+  const columnWidths = new Map<string, number>();
+
+  // Start with root nodes (no anchor)
+  const rootNodes = nodes.filter(n => !n.anchor_id);
+  rootNodes.forEach(root => {
+    calculateColumnWidth(root, nodes, baseWidths, columnWidths, new Set());
+  });
+
+  // Ensure all nodes have column widths (handle orphaned branches)
+  nodes.forEach(node => {
+    if (!columnWidths.has(node.id)) {
+      calculateColumnWidth(node, nodes, baseWidths, columnWidths, new Set());
+    }
+  });
+
+  // Calculate left offsets for all nodes
+  const leftOffsets = new Map<string, number>();
+  nodes.forEach(node => {
+    leftOffsets.set(node.id, calculateLeftOffset(node, nodes, baseWidths, columnWidths));
+  });
+
+  // PASS 3: Calculate positions
+  return nodes.map(node => {
+    const { x, y } = calculatePosition(node, nodeMap, columnWidths, leftOffsets, new Set());
     const duration = calculateDuration(node);
+    const columnWidth = columnWidths.get(node.id) || BASE_WIDTH_PX;
+    const attachedChildren = calculateAttachedChildren(node.id, nodes, columnWidths);
 
     return {
       ...node,
-      // Override x, y with calculated positions for React Flow
       x,
       y,
+      width: columnWidth, // Elastic width based on column calculation
       _computed: {
-        absoluteTime: 0, // Will be calculated when needed
-        absoluteTrack: 0, // Will be calculated when needed
+        absoluteTime: 0,   // TODO: Calculate from timeline position
+        absoluteTrack: 0,  // TODO: Calculate from vertical position
         duration,
-        generation,
+        generation: 0,     // TODO: Calculate depth in anchor chain
         hasAnchor: !!node.anchor_id,
+        elasticWidth: columnWidth,
+        attachedChildren,
       },
     };
   });
 };
 
+// =============================================================================
+// TREE BOUNDS (for Viewport Fitting)
+// =============================================================================
+
 /**
- * Map Connection Mode to Target Handle ID
+ * Calculate bounds for the entire node tree
+ * Used for "Fit View" to zoom out enough to see all nodes
  */
-const MODE_TO_HANDLE_ID: Record<string, string> = {
+export const calculateTreeBounds = (
+  nodes: StoryNode[]
+): { minX: number; maxX: number; minY: number; maxY: number } => {
+  if (nodes.length === 0) {
+    return { minX: 0, maxX: 0, minY: 0, maxY: 0 };
+  }
+
+  let minX = Infinity;
+  let maxX = -Infinity;
+  let minY = Infinity;
+  let maxY = -Infinity;
+
+  nodes.forEach(node => {
+    const width = node._computed?.elasticWidth || node.width || BASE_WIDTH_PX;
+    const height = node.height || (node.type === 'SPINE' ? SPINE_HEIGHT : SATELLITE_HEIGHT);
+
+    minX = Math.min(minX, node.x);
+    maxX = Math.max(maxX, node.x + width);
+    minY = Math.min(minY, node.y);
+    maxY = Math.max(maxY, node.y + height);
+  });
+
+  return { minX, maxX, minY, maxY };
+};
+
+// =============================================================================
+// EDGE GENERATION
+// =============================================================================
+
+/**
+ * Map Connection Mode to Handle ID on the PARENT node
+ */
+const MODE_TO_PARENT_HANDLE: Record<string, string> = {
   'STACK': 'anchor-top',
   'PREPEND': 'anchor-left',
   'APPEND': 'anchor-right'
 };
 
 /**
- * Get all anchor relationships as edges
- * Returns array with proper handle IDs for React Flow edges
+ * Generate edges for anchor relationships
+ * Uses smoothstep for orthogonal connections
  */
 export const getAnchorEdges = (
   nodes: StoryNode[]
@@ -182,9 +436,8 @@ export const getAnchorEdges = (
   target: string;
   sourceHandle: string;
   targetHandle: string;
-  connectionMode?: ConnectionMode;
   type: string;
-  style: Record<string, any>;
+  style: { stroke: string; strokeWidth: number; strokeDasharray: string };
   animated: boolean;
 }> => {
   const edges: Array<{
@@ -193,26 +446,40 @@ export const getAnchorEdges = (
     target: string;
     sourceHandle: string;
     targetHandle: string;
-    connectionMode?: ConnectionMode;
     type: string;
-    style: Record<string, any>;
+    style: { stroke: string; strokeWidth: number; strokeDasharray: string };
     animated: boolean;
   }> = [];
 
   nodes.forEach((node) => {
-    // Check if node has an anchor
     if (node.anchor_id && node.connection_mode) {
-      const targetHandle = MODE_TO_HANDLE_ID[node.connection_mode] || 'anchor-top';
+      const parent = nodes.find(n => n.id === node.anchor_id);
+      if (!parent) return;
+
+      const parentHandle = MODE_TO_PARENT_HANDLE[node.connection_mode];
+
+      // Determine child handle based on connection mode
+      let childHandle = 'tether-target';
+      if (node.connection_mode === 'PREPEND') childHandle = 'tether-right';
+      else if (node.connection_mode === 'APPEND') childHandle = 'tether-left';
+
+      // For STACK connections, use dynamic handle ID
+      let sourceHandle = parentHandle;
+      if (node.connection_mode === 'STACK' && parent._computed?.attachedChildren) {
+        const childInfo = parent._computed.attachedChildren.find(c => c.id === node.id);
+        if (childInfo) {
+          sourceHandle = `anchor-top-${node.id}`;
+        }
+      }
 
       edges.push({
-        id: `anchor-${node.id}-${node.anchor_id}`,
-        source: node.id, // Child (the one being anchored)
-        target: node.anchor_id, // Parent (the anchor)
-        sourceHandle: 'tether-source', // Child's output handle
-        targetHandle: targetHandle, // Parent's specific port
-        connectionMode: node.connection_mode,
-        type: 'step',
-        style: { stroke: '#2C2C2E', strokeWidth: 2 },
+        id: `edge-${node.anchor_id}-${node.id}`,
+        source: node.anchor_id,
+        target: node.id,
+        sourceHandle,
+        targetHandle: childHandle,
+        type: 'smoothstep',
+        style: { stroke: '#6366F1', strokeWidth: 2, strokeDasharray: '4 2' },
         animated: false,
       });
     }

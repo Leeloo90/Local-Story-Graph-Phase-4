@@ -1,8 +1,11 @@
-import React, { useState, useRef, useCallback } from 'react';
-import { Eye, EyeOff, Volume2, VolumeX, Magnet, Maximize2, Minimize2, Scissors } from 'lucide-react';
+import React, { useState, useRef, useCallback, useEffect } from 'react';
+import { Eye, EyeOff, Volume2, VolumeX, Magnet, Maximize2, Minimize2, Scissors, RefreshCw } from 'lucide-react';
+import { StoryNode, MediaAsset } from '../../../shared/types';
+import { computeAbsolutePositions, PIXELS_PER_SECOND } from '../utils/topology';
 
 interface TimelineViewProps {
   canvasId: string;
+  projectId?: string;
   isFullscreen?: boolean;
   onToggleFullscreen?: () => void;
 }
@@ -16,6 +19,7 @@ interface Clip {
   inPoint: number; // frames from original media start
   outPoint: number; // frames from original media end
   color: string;
+  nodeId?: string; // Reference to story node
 }
 
 interface Track {
@@ -24,52 +28,114 @@ interface Track {
   type: 'spine' | 'satellite' | 'audio';
   visible: boolean;
   muted: boolean;
+  trackIndex: number; // Vertical position in timeline
 }
 
-const TimelineView: React.FC<TimelineViewProps> = ({ isFullscreen = false, onToggleFullscreen }) => {
-  const [tracks] = useState<Track[]>([
-    { id: 'v1', name: 'V1 (Spine)', type: 'spine', visible: true, muted: false },
-    { id: 'v2', name: 'V2', type: 'satellite', visible: true, muted: false },
-    { id: 'v3', name: 'V3', type: 'satellite', visible: true, muted: false },
-    { id: 'a1', name: 'A1', type: 'audio', visible: true, muted: false },
+const TimelineView: React.FC<TimelineViewProps> = ({ canvasId, projectId, isFullscreen = false, onToggleFullscreen }) => {
+  const [tracks, setTracks] = useState<Track[]>([
+    { id: 'v1', name: 'V1 (Spine)', type: 'spine', visible: true, muted: false, trackIndex: 0 },
+    { id: 'v2', name: 'V2', type: 'satellite', visible: true, muted: false, trackIndex: 1 },
+    { id: 'v3', name: 'V3', type: 'satellite', visible: true, muted: false, trackIndex: 2 },
+    { id: 'a1', name: 'A1', type: 'audio', visible: true, muted: false, trackIndex: 3 },
   ]);
 
-  const [clips, setClips] = useState<Clip[]>([
-    {
-      id: 'clip1',
-      trackId: 'v1',
-      name: 'Opening Interview',
-      start: 200,
-      duration: 400,
-      inPoint: 0,
-      outPoint: 400,
-      color: '#A855F7',
-    },
-    {
-      id: 'clip2',
-      trackId: 'v1',
-      name: 'Activist Statement',
-      start: 700,
-      duration: 350,
-      inPoint: 0,
-      outPoint: 350,
-      color: '#A855F7',
-    },
-    {
-      id: 'clip3',
-      trackId: 'v2',
-      name: 'Ocean B-Roll',
-      start: 300,
-      duration: 200,
-      inPoint: 0,
-      outPoint: 200,
-      color: '#06B6D4',
-    },
-  ]);
+  const [clips, setClips] = useState<Clip[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
 
-  const [playheadPosition] = useState(1200);
+  const [playheadPosition, _setPlayheadPosition] = useState(0);
   const [magneticSnap, setMagneticSnap] = useState(true);
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
+
+  // Load timeline data from story graph
+  const loadTimelineData = useCallback(async () => {
+    if (!canvasId) return;
+
+    setIsLoading(true);
+    try {
+      // Load story nodes
+      const storyNodes: StoryNode[] = await window.electronAPI.nodeList(canvasId);
+      const computedNodes = computeAbsolutePositions(storyNodes);
+
+      // Load media assets for names
+      const mediaAssets: MediaAsset[] = projectId
+        ? await window.electronAPI.mediaGetAll(projectId)
+        : [];
+      const assetMap = new Map(mediaAssets.map(a => [a.id, a]));
+
+      // Convert story nodes to timeline clips
+      // The timeline shows a linearized view of the story graph
+      // X position in canvas = timeline position
+
+      // Find the leftmost node position to use as timeline start
+      const minX = Math.min(...computedNodes.map(n => n.x), 0);
+
+      // Group nodes by vertical track (based on drift_y or y position)
+      const nodesByTrack = new Map<number, StoryNode[]>();
+
+      computedNodes.forEach(node => {
+        // Calculate track based on node type and y position
+        let trackIndex = 0;
+        if (node.type === 'SPINE') {
+          trackIndex = 0; // Spine nodes on V1
+        } else {
+          // Satellites based on their vertical position relative to spine
+          const relativeY = node.drift_y || 0;
+          trackIndex = 1 + Math.abs(relativeY);
+        }
+
+        if (!nodesByTrack.has(trackIndex)) {
+          nodesByTrack.set(trackIndex, []);
+        }
+        nodesByTrack.get(trackIndex)!.push(node);
+      });
+
+      // Create clips from nodes
+      const newClips: Clip[] = computedNodes.map(node => {
+        const asset = node.asset_id ? assetMap.get(node.asset_id) : undefined;
+        const duration = (node.clip_out || 5) - (node.clip_in || 0);
+        const durationPx = duration * PIXELS_PER_SECOND;
+
+        // Determine track
+        let trackId = 'v1';
+        if (node.type === 'SATELLITE') {
+          const relativeY = node.drift_y || 0;
+          if (relativeY === 0 || relativeY === 1) trackId = 'v2';
+          else trackId = 'v3';
+        }
+
+        return {
+          id: node.id,
+          nodeId: node.id,
+          trackId,
+          name: asset?.clean_name || asset?.file_name || 'Untitled',
+          start: (node.x - minX), // Normalize to start from 0
+          duration: Math.max(durationPx, 50), // Minimum 50px width
+          inPoint: node.clip_in || 0,
+          outPoint: node.clip_out || duration,
+          color: node.type === 'SPINE' ? '#A855F7' : '#06B6D4',
+        };
+      });
+
+      setClips(newClips);
+
+      // Update tracks based on used tracks
+      const usedTracks = new Set(newClips.map(c => c.trackId));
+      setTracks(prev => prev.map(track => ({
+        ...track,
+        visible: usedTracks.has(track.id) || track.id === 'v1',
+      })));
+
+    } catch (error) {
+      console.error('[Timeline] Failed to load data:', error);
+    } finally {
+      setIsLoading(false);
+    }
+  }, [canvasId, projectId]);
+
+  // Load data on mount and when canvasId changes
+  useEffect(() => {
+    loadTimelineData();
+  }, [loadTimelineData]);
   const [dragState, setDragState] = useState<{
     clipId: string;
     handle: 'start' | 'end' | 'body' | null;
@@ -246,6 +312,17 @@ const TimelineView: React.FC<TimelineViewProps> = ({ isFullscreen = false, onTog
             Razor
           </button>
 
+          {/* Refresh Button */}
+          <button
+            onClick={loadTimelineData}
+            className={`btn-ghost text-xs flex items-center gap-2 ${isLoading ? 'animate-spin' : ''}`}
+            title="Refresh Timeline"
+            disabled={isLoading}
+          >
+            <RefreshCw size={14} />
+            {isLoading ? 'Loading...' : 'Refresh'}
+          </button>
+
           {/* Fullscreen Toggle */}
           {onToggleFullscreen && (
             <button
@@ -262,6 +339,8 @@ const TimelineView: React.FC<TimelineViewProps> = ({ isFullscreen = false, onTog
         </div>
 
         <div className="flex items-center gap-2 text-xs text-text-tertiary">
+          <span className="text-text-secondary">{clips.length} clips</span>
+          <span className="text-void-gray">|</span>
           <span className="timecode">00:00:00:00</span>
           <span>→</span>
           <span className="timecode">00:02:30:00</span>

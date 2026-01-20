@@ -1,52 +1,60 @@
-import React, { useState, useEffect } from 'react';
-import { Plus, FolderOpen } from 'lucide-react';
-import { mockProjects, MockProject } from '../data/mockData';
+import React, { useState, useEffect, useRef } from 'react';
+import { Plus, FolderOpen, MoreVertical, Pencil, Trash2, Settings } from 'lucide-react';
 import { Project } from '../../../shared/types';
 import ProjectCard from './ProjectCard';
 import NewProjectModal from './NewProjectModal';
+import EditProjectModal from './EditProjectModal';
 
 interface HomeViewProps {
   onOpenProject: (projectId: string) => void;
 }
 
+interface ContextMenuState {
+  visible: boolean;
+  x: number;
+  y: number;
+  project: Project | null;
+}
+
 const HomeView: React.FC<HomeViewProps> = ({ onOpenProject }) => {
   const [projects, setProjects] = useState<Project[]>([]);
   const [showNewProjectModal, setShowNewProjectModal] = useState(false);
+  const [editingProject, setEditingProject] = useState<Project | null>(null);
   const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid');
   const [loading, setLoading] = useState(true);
+  const [contextMenu, setContextMenu] = useState<ContextMenuState>({
+    visible: false,
+    x: 0,
+    y: 0,
+    project: null,
+  });
+  const contextMenuRef = useRef<HTMLDivElement>(null);
 
-  // Load projects from database and create mock ones if needed
+  // Load projects from database (no mock data)
   useEffect(() => {
-    loadOrCreateProjects();
+    loadProjects();
   }, []);
 
-  const loadOrCreateProjects = async () => {
+  // Close context menu when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (contextMenuRef.current && !contextMenuRef.current.contains(e.target as Node)) {
+        setContextMenu({ visible: false, x: 0, y: 0, project: null });
+      }
+    };
+
+    if (contextMenu.visible) {
+      document.addEventListener('mousedown', handleClickOutside);
+      return () => document.removeEventListener('mousedown', handleClickOutside);
+    }
+  }, [contextMenu.visible]);
+
+  const loadProjects = async () => {
     try {
       setLoading(true);
-
-      // Try to load existing projects
       const existingProjects = await window.electronAPI.projectList();
-
-      // If no projects exist, create the mock ones
-      if (existingProjects.length === 0) {
-        console.log('[Home] No projects found, creating mock projects...');
-
-        for (const mockProject of mockProjects) {
-          await window.electronAPI.projectCreate({
-            name: mockProject.name,
-            client: mockProject.client,
-            status: mockProject.status as 'ACTIVE' | 'ARCHIVED' | 'COMPLETED',
-          });
-        }
-
-        // Reload projects after creating
-        const newProjects = await window.electronAPI.projectList();
-        setProjects(newProjects);
-        console.log('[Home] Created', newProjects.length, 'projects');
-      } else {
-        setProjects(existingProjects);
-        console.log('[Home] Loaded', existingProjects.length, 'projects');
-      }
+      setProjects(existingProjects);
+      console.log('[Home] Loaded', existingProjects.length, 'projects');
     } catch (error) {
       console.error('[Home] Failed to load projects:', error);
     } finally {
@@ -70,6 +78,8 @@ const HomeView: React.FC<HomeViewProps> = ({ onOpenProject }) => {
         client: projectData.client,
         description: projectData.description,
         status: 'ACTIVE',
+        defaultFps: projectData.fps,
+        defaultResolution: projectData.resolution,
       });
 
       console.log('[Home] Project created with ID:', newProject.id);
@@ -86,8 +96,7 @@ const HomeView: React.FC<HomeViewProps> = ({ onOpenProject }) => {
       console.log('[Home] Default canvas created');
 
       // 3. Refresh the project list
-      const updatedProjects = await window.electronAPI.projectList();
-      setProjects(updatedProjects);
+      await loadProjects();
 
       // 4. Close the modal
       setShowNewProjectModal(false);
@@ -96,6 +105,53 @@ const HomeView: React.FC<HomeViewProps> = ({ onOpenProject }) => {
     } catch (error) {
       console.error('[Home] Failed to create project:', error);
       alert('Failed to create project. Check console for details.');
+    }
+  };
+
+  const handleContextMenu = (e: React.MouseEvent, project: Project) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setContextMenu({
+      visible: true,
+      x: e.clientX,
+      y: e.clientY,
+      project,
+    });
+  };
+
+  const handleDeleteProject = async (project: Project) => {
+    const confirmed = window.confirm(
+      `Are you sure you want to delete "${project.name}"?\n\nThis will permanently delete the project and all associated canvases, nodes, and media references.`
+    );
+
+    if (confirmed) {
+      try {
+        await window.electronAPI.projectDelete(project.id);
+        await loadProjects();
+        console.log('[Home] Project deleted:', project.name);
+      } catch (error) {
+        console.error('[Home] Failed to delete project:', error);
+        alert('Failed to delete project. Check console for details.');
+      }
+    }
+
+    setContextMenu({ visible: false, x: 0, y: 0, project: null });
+  };
+
+  const handleEditProject = (project: Project) => {
+    setEditingProject(project);
+    setContextMenu({ visible: false, x: 0, y: 0, project: null });
+  };
+
+  const handleUpdateProject = async (id: string, updates: Partial<Project>) => {
+    try {
+      await window.electronAPI.projectUpdate(id, updates);
+      await loadProjects();
+      setEditingProject(null);
+      console.log('[Home] Project updated');
+    } catch (error) {
+      console.error('[Home] Failed to update project:', error);
+      alert('Failed to update project. Check console for details.');
     }
   };
 
@@ -186,33 +242,94 @@ const HomeView: React.FC<HomeViewProps> = ({ onOpenProject }) => {
           ) : viewMode === 'grid' ? (
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
               {projects.map((project) => (
-                <ProjectCard
-                  key={project.id}
-                  project={project}
-                  onClick={() => onOpenProject(project.id)}
-                />
+                <div key={project.id} className="relative group">
+                  <ProjectCard
+                    project={project}
+                    onClick={() => onOpenProject(project.id)}
+                    onContextMenu={(e) => handleContextMenu(e, project)}
+                  />
+                  {/* Quick Actions Button */}
+                  <button
+                    onClick={(e) => handleContextMenu(e, project)}
+                    className="absolute top-2 right-2 p-1.5 bg-void-dark bg-opacity-80 rounded opacity-0 group-hover:opacity-100 transition-opacity hover:bg-opacity-100"
+                    title="More options"
+                  >
+                    <MoreVertical size={16} className="text-text-secondary" />
+                  </button>
+                </div>
               ))}
             </div>
           ) : (
             <div className="space-y-2">
               {projects.map((project) => (
-                <ProjectCard
-                  key={project.id}
-                  project={project}
-                  onClick={() => onOpenProject(project.id)}
-                  variant="list"
-                />
+                <div key={project.id} className="relative group">
+                  <ProjectCard
+                    project={project}
+                    onClick={() => onOpenProject(project.id)}
+                    onContextMenu={(e) => handleContextMenu(e, project)}
+                    variant="list"
+                  />
+                  {/* Quick Actions Button */}
+                  <button
+                    onClick={(e) => handleContextMenu(e, project)}
+                    className="absolute top-1/2 -translate-y-1/2 right-4 p-1.5 bg-void-dark bg-opacity-80 rounded opacity-0 group-hover:opacity-100 transition-opacity hover:bg-opacity-100"
+                    title="More options"
+                  >
+                    <MoreVertical size={16} className="text-text-secondary" />
+                  </button>
+                </div>
               ))}
             </div>
           )}
         </div>
       </main>
 
+      {/* Context Menu */}
+      {contextMenu.visible && contextMenu.project && (
+        <div
+          ref={contextMenuRef}
+          className="fixed bg-surface-high border border-void-gray rounded-lg shadow-lg py-1 z-50 min-w-[160px]"
+          style={{ left: contextMenu.x, top: contextMenu.y }}
+        >
+          <button
+            onClick={() => handleEditProject(contextMenu.project!)}
+            className="w-full px-4 py-2 text-left text-sm text-text-primary hover:bg-surface-low flex items-center gap-2"
+          >
+            <Pencil size={14} />
+            Edit Project
+          </button>
+          <button
+            onClick={() => handleEditProject(contextMenu.project!)}
+            className="w-full px-4 py-2 text-left text-sm text-text-primary hover:bg-surface-low flex items-center gap-2"
+          >
+            <Settings size={14} />
+            Project Settings
+          </button>
+          <div className="border-t border-void-gray my-1" />
+          <button
+            onClick={() => handleDeleteProject(contextMenu.project!)}
+            className="w-full px-4 py-2 text-left text-sm text-accent-red hover:bg-surface-low flex items-center gap-2"
+          >
+            <Trash2 size={14} />
+            Delete Project
+          </button>
+        </div>
+      )}
+
       {/* New Project Modal */}
       {showNewProjectModal && (
         <NewProjectModal
           onClose={() => setShowNewProjectModal(false)}
           onCreateProject={handleCreateProject}
+        />
+      )}
+
+      {/* Edit Project Modal */}
+      {editingProject && (
+        <EditProjectModal
+          project={editingProject}
+          onClose={() => setEditingProject(null)}
+          onSave={handleUpdateProject}
         />
       )}
     </div>

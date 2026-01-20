@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 import HomeView from './components/HomeView';
 import DashboardView from './components/DashboardView';
 import CanvasView from './components/CanvasView';

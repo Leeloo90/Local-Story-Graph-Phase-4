@@ -1,8 +1,9 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { ArrowLeft, Settings } from 'lucide-react';
 import MediaLibraryPanel from './MediaLibraryPanel';
 import CanvasManagementPanel from './CanvasManagementPanel';
 import InspectorPanel from './InspectorPanel';
+import { Project } from '../../../shared/types';
 
 interface DashboardViewProps {
   projectId: string;
@@ -15,13 +16,26 @@ const DashboardView: React.FC<DashboardViewProps> = ({
   onBack,
   onOpenCanvas,
 }) => {
+  const [project, setProject] = useState<Project | null>(null);
   const [leftPanelWidth, setLeftPanelWidth] = useState(320);
   const [rightPanelWidth, setRightPanelWidth] = useState(380);
   const [isResizingLeft, setIsResizingLeft] = useState(false);
   const [isResizingRight, setIsResizingRight] = useState(false);
 
-  // Mock project data
-  const projectName = 'Documentary: Climate Crisis';
+  // Load project data
+  useEffect(() => {
+    const loadProject = async () => {
+      try {
+        const loadedProject = await window.electronAPI.projectGet(projectId);
+        setProject(loadedProject);
+        console.log('[Dashboard] Loaded project:', loadedProject?.name);
+      } catch (error) {
+        console.error('[Dashboard] Failed to load project:', error);
+      }
+    };
+
+    loadProject();
+  }, [projectId]);
 
   const handleMouseMove = (e: MouseEvent) => {
     if (isResizingLeft) {
@@ -39,7 +53,7 @@ const DashboardView: React.FC<DashboardViewProps> = ({
     setIsResizingRight(false);
   };
 
-  React.useEffect(() => {
+  useEffect(() => {
     if (isResizingLeft || isResizingRight) {
       window.addEventListener('mousemove', handleMouseMove);
       window.addEventListener('mouseup', handleMouseUp);
@@ -64,9 +78,11 @@ const DashboardView: React.FC<DashboardViewProps> = ({
           </button>
           <div>
             <h1 className="text-lg font-semibold text-text-primary">
-              {projectName}
+              {project?.name || 'Loading...'}
             </h1>
-            <p className="text-xs text-text-tertiary">Project Dashboard</p>
+            <p className="text-xs text-text-tertiary">
+              {project?.client ? `${project.client} · ` : ''}Project Dashboard
+            </p>
           </div>
         </div>
 

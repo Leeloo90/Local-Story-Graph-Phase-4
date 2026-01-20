@@ -1,9 +1,14 @@
 import React from 'react';
-import { Handle, Position, NodeProps } from '@xyflow/react';
+import { Handle, Position } from '@xyflow/react';
 import { Film, Trash2 } from 'lucide-react';
 import { ReactFlowNodeData } from '../../../../shared/types';
 
-const SpineNode: React.FC<NodeProps<ReactFlowNodeData>> = ({ data, selected }) => {
+interface SpineNodeProps {
+  data: ReactFlowNodeData;
+  selected?: boolean;
+}
+
+const SpineNode: React.FC<SpineNodeProps> = ({ data, selected }) => {
   const { storyNode, asset, label, onDelete } = data;
 
   const formatDuration = (seconds: number | null | undefined) => {
@@ -13,16 +18,24 @@ const SpineNode: React.FC<NodeProps<ReactFlowNodeData>> = ({ data, selected }) =
     return `${mins}:${secs.toString().padStart(2, '0')}`;
   };
 
+  // Get elastic width and attached children from computed data
+  const elasticWidth = storyNode._computed?.elasticWidth || 200;
+  const attachedChildren = storyNode._computed?.attachedChildren || [];
+
+  // Fixed height for consistency - spine nodes should not change height when children attach
+  const SPINE_HEIGHT = 130; // Fixed height in pixels
+
   return (
     <div
-      className={`min-w-[200px] bg-surface-high rounded-node border-2 transition-all ${
+      className={`min-w-[200px] bg-surface-high rounded-node border-2 transition-all overflow-hidden flex flex-col ${
         selected
           ? 'border-accent-purple shadow-node-active'
           : 'border-accent-purple border-opacity-50'
       }`}
+      style={{ width: `${elasticWidth}px`, height: `${SPINE_HEIGHT}px` }}
     >
       {/* Header */}
-      <div className="px-3 py-2 bg-accent-purple bg-opacity-10 border-b border-accent-purple border-opacity-20 flex items-center gap-2 justify-between">
+      <div className="px-3 py-1.5 bg-accent-purple bg-opacity-10 border-b border-accent-purple border-opacity-20 flex items-center gap-2 justify-between flex-shrink-0">
         <div className="flex items-center gap-2">
           <Film size={14} className="text-accent-purple" />
           <span className="text-xs font-semibold text-accent-purple uppercase">
@@ -44,17 +57,16 @@ const SpineNode: React.FC<NodeProps<ReactFlowNodeData>> = ({ data, selected }) =
       </div>
 
       {/* Content */}
-      <div className="p-3">
-        <h4 className="text-sm font-medium text-text-primary mb-2">
+      <div className="p-2 flex-1 overflow-hidden">
+        <h4 className="text-xs font-medium text-text-primary mb-1 truncate">
           {label}
         </h4>
 
         {asset && (
           <>
-            {/* Waveform Placeholder */}
-            <div className="h-12 bg-void-dark rounded mb-2 flex items-center justify-center">
-              <div className="flex gap-0.5 h-8">
-                {[...Array(20)].map((_, i) => (
+            <div className="h-10 bg-void-dark rounded mb-1 flex items-center justify-center">
+              <div className="flex gap-0.5 h-6">
+                {[...Array(16)].map((_, i) => (
                   <div
                     key={i}
                     className="w-1 bg-accent-purple rounded"
@@ -66,74 +78,84 @@ const SpineNode: React.FC<NodeProps<ReactFlowNodeData>> = ({ data, selected }) =
                 ))}
               </div>
             </div>
-
-            {/* Metadata */}
-            <div className="flex items-center gap-2 text-xs">
+            <div className="flex items-center gap-2 text-[10px]">
               <span className="timecode text-text-tertiary">
                 {formatDuration(asset.duration)}
               </span>
               {asset.fps && (
                 <span className="timecode text-text-tertiary">
-                  {asset.fps.toFixed(2)} fps
-                </span>
-              )}
-              {asset.resolution && (
-                <span className="coordinate text-text-tertiary text-[10px]">
-                  {asset.resolution}
+                  {asset.fps.toFixed(0)}fps
                 </span>
               )}
             </div>
           </>
         )}
-
-        {!asset && (
-          <div className="text-xs text-text-tertiary">
-            Text Node
-          </div>
-        )}
       </div>
 
-      {/* PORTS (TARGETS) - These accept incoming connections from Satellites */}
+      {/* PORTS (SOURCE) - Hold Children */}
 
-      {/* Left Port: For PREPEND (J-Cut) Satellites */}
+      {/* Left Port: Holds Prepend Children (Source) */}
       <Handle
-        type="target"
+        type="source"
         position={Position.Left}
         className="!w-3 !h-3 !bg-accent-purple !border-2 !border-surface-high hover:!bg-white"
         id="anchor-left"
       />
 
-      {/* Right Port: For APPEND (L-Cut) Satellites */}
+      {/* Left Target: Receive connections when this node is prepended to another */}
       <Handle
         type="target"
+        position={Position.Left}
+        id="tether-left"
+        className="!w-3 !h-3 !bg-accent-purple !border-2 !border-surface-high !opacity-0"
+      />
+
+      {/* Right Port: Holds Append Children (Source) */}
+      <Handle
+        type="source"
         position={Position.Right}
         className="!w-3 !h-3 !bg-accent-purple !border-2 !border-surface-high hover:!bg-white"
         id="anchor-right"
       />
 
-      {/* Top Port: For STACK (Overlay) Satellites */}
+      {/* Right Target: Receive connections when this node is appended to another */}
       <Handle
         type="target"
-        position={Position.Top}
-        className="!w-3 !h-3 !bg-accent-purple !border-2 !border-surface-high hover:!bg-white"
-        id="anchor-top"
+        position={Position.Right}
+        id="tether-right"
+        className="!w-3 !h-3 !bg-accent-purple !border-2 !border-surface-high !opacity-0"
       />
 
-      {/* Bottom Port: Reserved for music satellites (later phase) */}
-      <Handle
-        type="target"
-        position={Position.Bottom}
-        className="!w-3 !h-3 !bg-accent-purple !border-2 !border-surface-high hover:!bg-white"
-        id="anchor-bottom"
-      />
+      {/* Dynamic Handles for Stacked Children - One handle per child at specific position */}
+      {attachedChildren.map((child: { id: string; relX: number }) => (
+        <Handle
+          key={child.id}
+          type="source"
+          position={Position.Top}
+          className="!w-3 !h-3 !bg-accent-purple !border-2 !border-surface-high hover:!bg-white"
+          id={`anchor-top-${child.id}`}
+          style={{ left: `${child.relX}%` }}
+        />
+      ))}
 
-      {/* This allows a Spine node to be dragged onto another node (becoming a child) */}
+      {/* Invisible full-width drop zone at top for accepting new children */}
       <Handle
         type="source"
-        position={Position.Bottom}
-        id="tether-source"
-        className="!w-3 !h-3 !bg-white !border-2 !border-accent-purple !-bottom-1.5 !z-50 hover:!scale-125"
+        position={Position.Top}
+        className="!w-full !h-3 !opacity-0"
+        id="anchor-top"
+        style={{ left: 0, width: '100%' }}
       />
+
+      {/* TETHER TARGET (TARGET) - Where a stacked child hooks to this node (bottom target) */}
+      <Handle
+        type="target"
+        position={Position.Bottom}
+        id="tether-target"
+        className="!w-3 !h-3 !bg-white !border-2 !border-accent-purple hover:!scale-125"
+      />
+
+      {/* Left/Right target aliases already added earlier for PREPEND/APPEND children */}
     </div>
   );
 };

@@ -58,6 +58,8 @@ export class StoryGraphDatabase {
         description TEXT,
         client TEXT,
         status TEXT CHECK(status IN ('ACTIVE', 'ARCHIVED', 'COMPLETED')) DEFAULT 'ACTIVE',
+        defaultFps INTEGER NOT NULL DEFAULT 24,
+        defaultResolution TEXT NOT NULL DEFAULT '1920x1080',
         created_at TEXT NOT NULL DEFAULT (datetime('now')),
         updated_at TEXT NOT NULL DEFAULT (datetime('now'))
       );
@@ -101,18 +103,13 @@ export class StoryGraphDatabase {
     // ========================================================================
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS transcripts (
-        id TEXT PRIMARY KEY,
-        asset_id TEXT NOT NULL,
-        speaker TEXT,
-        time_in INTEGER NOT NULL,
-        time_out INTEGER NOT NULL,
-        content TEXT NOT NULL,
-        word_map TEXT,
-        sync_offset_frames INTEGER DEFAULT 0,
-        FOREIGN KEY (asset_id) REFERENCES media_library(id) ON DELETE CASCADE
+          media_id TEXT PRIMARY KEY,
+          source_type TEXT NOT NULL,
+          raw_text TEXT,
+          word_map_json TEXT NOT NULL,
+          created_at INTEGER DEFAULT (unixepoch()),
+          FOREIGN KEY(media_id) REFERENCES media_library(id) ON DELETE CASCADE
       );
-
-      CREATE INDEX IF NOT EXISTS idx_transcript_asset ON transcripts(asset_id);
     `);
 
     // ========================================================================
@@ -195,20 +192,15 @@ export class StoryGraphDatabase {
         drift_x REAL DEFAULT 0,
         drift_y INTEGER DEFAULT 0,
 
-        -- Attic system (Magnetic Construction v2)
-        -- Nodes in the Attic are "parked" above a Spine, not yet committed to the edit
-        attic_parent_id TEXT,
-
         -- Clip trimming (in seconds)
         clip_in REAL DEFAULT 0,
         clip_out REAL,
 
-        internal_state_map TEXT,
+        internal_state JSON,
         FOREIGN KEY (asset_id) REFERENCES media_library(id) ON DELETE SET NULL,
         FOREIGN KEY (act_id) REFERENCES fractal_containers(id) ON DELETE SET NULL,
         FOREIGN KEY (scene_id) REFERENCES fractal_containers(id) ON DELETE SET NULL,
-        FOREIGN KEY (anchor_id) REFERENCES story_nodes(id) ON DELETE SET NULL,
-        FOREIGN KEY (attic_parent_id) REFERENCES story_nodes(id) ON DELETE SET NULL
+        FOREIGN KEY (anchor_id) REFERENCES story_nodes(id) ON DELETE SET NULL
       );
 
       CREATE INDEX IF NOT EXISTS idx_node_asset ON story_nodes(asset_id);
@@ -218,7 +210,6 @@ export class StoryGraphDatabase {
       CREATE INDEX IF NOT EXISTS idx_node_is_global ON story_nodes(is_global);
       CREATE INDEX IF NOT EXISTS idx_node_anchor ON story_nodes(anchor_id);
       CREATE INDEX IF NOT EXISTS idx_node_connection_mode ON story_nodes(connection_mode);
-      CREATE INDEX IF NOT EXISTS idx_node_attic_parent ON story_nodes(attic_parent_id);
     `);
 
     // ========================================================================
@@ -227,20 +218,15 @@ export class StoryGraphDatabase {
     // ========================================================================
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS multicam_members (
-        id TEXT PRIMARY KEY,
-        parent_asset_id TEXT NOT NULL,
-        child_asset_id TEXT NOT NULL,
-        track_index INTEGER NOT NULL,
-        sync_offset INTEGER DEFAULT 0,
-        is_primary_audio INTEGER DEFAULT 0,
-        audio_role TEXT,
-        is_sync_reference INTEGER DEFAULT 0,
-        FOREIGN KEY (parent_asset_id) REFERENCES media_library(id) ON DELETE CASCADE,
-        FOREIGN KEY (child_asset_id) REFERENCES media_library(id) ON DELETE CASCADE
+        multicam_media_id TEXT NOT NULL,
+        member_media_id TEXT NOT NULL,
+        angle_label TEXT NOT NULL,
+        sync_offset REAL DEFAULT 0,
+        audio_channel_map TEXT,
+        PRIMARY KEY (multicam_media_id, member_media_id),
+        FOREIGN KEY(multicam_media_id) REFERENCES media_library(id) ON DELETE CASCADE,
+        FOREIGN KEY(member_media_id) REFERENCES media_library(id)
       );
-
-      CREATE INDEX IF NOT EXISTS idx_multicam_parent ON multicam_members(parent_asset_id);
-      CREATE INDEX IF NOT EXISTS idx_multicam_child ON multicam_members(child_asset_id);
     `);
 
     // ========================================================================

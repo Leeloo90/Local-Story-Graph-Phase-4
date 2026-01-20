@@ -5,13 +5,28 @@
 
 import { ipcMain, dialog } from 'electron';
 import { v4 as uuidv4 } from 'uuid';
-import type { Project, Canvas, StoryNode, MediaAsset, ConnectionMode } from '../../shared/types';
+import type { Project, Canvas, StoryNode, MediaAsset, ConnectionMode, FractalContainer } from '../../shared/types';
 import StoryGraphDatabase from '../database/schema';
 import { extractMetadata, isSupportedMediaFile, generateCleanName, calculateEndTimecode } from '../services/ffmpeg';
 import {
   validateAnchorChain,
   validateSemanticRules,
 } from '../services/topology';
+import { importTranscript, getTranscriptForNode } from '../services/transcriptService';
+import { parseMulticamXml } from '../services/multicamService';
+import { generateFCPXML } from '../services/exportService';
+import {
+  executeCommand,
+  undo,
+  redo,
+  createNodeCommand,
+  deleteNodeCommand,
+  updateNodeCommand,
+  updateNodePositionCommand,
+  linkNodeCommand,
+  unlinkNodeCommand,
+} from '../services/historyService';
+import fs from 'fs/promises';
 import path from 'path';
 
 let db: StoryGraphDatabase | null = null;
@@ -22,6 +37,62 @@ export function initializeDatabase(projectName: string = 'default') {
 }
 
 export function registerIpcHandlers() {
+  // ===========================================================================
+  // HISTORY OPERATIONS
+  // ===========================================================================
+  ipcMain.handle('history:undo', async () => {
+    if (!db) throw new Error('Database not initialized');
+    await undo(db);
+  });
+
+  ipcMain.handle('history:redo', async () => {
+    if (!db) throw new Error('Database not initialized');
+    await redo(db);
+  });
+
+  // ===========================================================================
+  // EXPORT OPERATIONS
+  // ===========================================================================
+  ipcMain.handle('export:generate-fcpxml', async (_event, projectId: string, filePath: string) => {
+    if (!db) throw new Error('Database not initialized');
+    return generateFCPXML(db, projectId, filePath);
+  });
+
+  // ===========================================================================
+  // MULTICAM OPERATIONS
+  // ===========================================================================
+  ipcMain.handle('multicam:import-xml', async (_event, filePath: string) => {
+    if (!db) throw new Error('Database not initialized');
+    const xmlContent = await fs.readFile(filePath, 'utf-8');
+    return parseMulticamXml(db, xmlContent);
+  });
+
+  ipcMain.handle('multicam:get-members', async (_event, multicamMediaId: string) => {
+    if (!db) throw new Error('Database not initialized');
+    return db.query('SELECT * FROM multicam_members WHERE multicam_media_id = ?', [multicamMediaId]);
+  });
+
+  ipcMain.handle('node:set-angle', async (_event, nodeId: string, memberMediaId: string) => {
+    if (!db) throw new Error('Database not initialized');
+    db.execute(
+      `UPDATE story_nodes SET internal_state = json_set(internal_state, '$.active_angle', ?) WHERE id = ?`,
+      [memberMediaId, nodeId]
+    );
+  });
+
+  // ===========================================================================
+  // TRANSCRIPT OPERATIONS
+  // ===========================================================================
+  ipcMain.handle('transcript:import', async (_event, mediaId: string, filePath: string) => {
+    if (!db) throw new Error('Database not initialized');
+    return importTranscript(db, mediaId, filePath);
+  });
+
+  ipcMain.handle('transcript:get-for-node', async (_event, nodeId: string) => {
+    if (!db) throw new Error('Database not initialized');
+    return getTranscriptForNode(db, nodeId);
+  });
+
   // ===========================================================================
   // FILE OPERATIONS
   // ===========================================================================
@@ -76,9 +147,9 @@ export function registerIpcHandlers() {
     };
 
     db.execute(
-      `INSERT INTO projects (id, name, description, client, status, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [project.id, project.name, project.description || null, project.client || null, project.status, project.created_at, project.updated_at]
+      `INSERT INTO projects (id, name, description, client, status, defaultFps, defaultResolution, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [project.id, project.name, project.description || null, project.client || null, project.status, project.defaultFps, project.defaultResolution, project.created_at, project.updated_at]
     );
 
     // Create default project settings
@@ -92,8 +163,8 @@ export function registerIpcHandlers() {
     const canvasId = uuidv4();
     db.execute(
       `INSERT INTO canvases (id, project_id, name, created_at, updated_at, FPS, Resolution, Timecode_mode)
-       VALUES (?, ?, ?, ?, ?, 24, '1920x1080', 'NON_DROP')`,
-      [canvasId, project.id, 'Main Canvas', now, now]
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'NON_DROP')`,
+      [canvasId, project.id, 'Main Canvas', now, now, project.defaultFps, project.defaultResolution]
     );
 
     // Set default canvas in settings
@@ -353,6 +424,56 @@ export function registerIpcHandlers() {
     return db.query('SELECT * FROM canvases WHERE project_id = ? ORDER BY created_at DESC', [projectId]);
   });
 
+  ipcMain.handle('canvas-get', async (_event, canvasId: string) => {
+    if (!db) throw new Error('Database not initialized');
+    const results = db.query('SELECT * FROM canvases WHERE id = ?', [canvasId]);
+    return results[0] || null;
+  });
+
+  ipcMain.handle('canvas-update', async (_event, canvasId: string, updates: Partial<Canvas>) => {
+    if (!db) throw new Error('Database not initialized');
+
+    const allowedFields = ['name', 'description', 'FPS', 'Resolution', 'Timecode_mode'];
+    const setClauses: string[] = [];
+    const values: any[] = [];
+
+    for (const [key, value] of Object.entries(updates)) {
+      if (allowedFields.includes(key)) {
+        setClauses.push(`${key} = ?`);
+        values.push(value);
+      }
+    }
+
+    if (setClauses.length === 0) return;
+
+    setClauses.push('updated_at = ?');
+    values.push(new Date().toISOString());
+    values.push(canvasId);
+
+    db.execute(
+      `UPDATE canvases SET ${setClauses.join(', ')} WHERE id = ?`,
+      values
+    );
+
+    console.log(`Canvas updated: ${canvasId}`);
+  });
+
+  ipcMain.handle('canvas-delete', async (_event, canvasId: string) => {
+    if (!db) throw new Error('Database not initialized');
+
+    // Delete associated nodes first
+    db.execute('DELETE FROM story_nodes WHERE scene_id IN (SELECT id FROM fractal_containers WHERE canvas_id = ?)', [canvasId]);
+    db.execute('DELETE FROM story_nodes WHERE act_id IN (SELECT id FROM fractal_containers WHERE canvas_id = ?)', [canvasId]);
+
+    // Delete containers
+    db.execute('DELETE FROM fractal_containers WHERE canvas_id = ?', [canvasId]);
+
+    // Delete the canvas
+    db.execute('DELETE FROM canvases WHERE id = ?', [canvasId]);
+
+    console.log(`Canvas deleted: ${canvasId}`);
+  });
+
   // ===========================================================================
   // NODE OPERATIONS
   // ===========================================================================
@@ -370,36 +491,7 @@ export function registerIpcHandlers() {
       ...nodeData,
     };
 
-    db.execute(
-      `INSERT INTO story_nodes (
-        id, asset_id, act_id, scene_id, type, subtype, is_global,
-        x, y, width, height, color,
-        anchor_id, connection_mode, drift_x, drift_y,
-        clip_in, clip_out,
-        internal_state_map
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        node.id,
-        node.asset_id || null,
-        node.act_id || null,
-        node.scene_id || null,
-        node.type,
-        node.subtype,
-        node.is_global ? 1 : 0,
-        node.x,
-        node.y,
-        node.width,
-        node.height,
-        node.color || null,
-        node.anchor_id || null,
-        node.connection_mode || 'STACK',
-        node.drift_x || 0,
-        node.drift_y || 0,
-        node.clip_in || 0,
-        node.clip_out || null,
-        node.internal_state_map ? JSON.stringify(node.internal_state_map) : null,
-      ]
-    );
+    await executeCommand(db, createNodeCommand(node));
 
     console.log(`Node created: ${node.id}`);
     return node;
@@ -408,36 +500,26 @@ export function registerIpcHandlers() {
   ipcMain.handle('node-update', async (_event, id: string, updates: Partial<StoryNode>) => {
     if (!db) throw new Error('Database not initialized');
 
-    const fields: string[] = [];
-    const values: any[] = [];
-
-    // Build dynamic UPDATE query
-    Object.entries(updates).forEach(([key, value]) => {
-      if (key === 'id') return; // Don't update ID
-      fields.push(`${key} = ?`);
-      if (key === 'is_global') {
-        values.push(value ? 1 : 0);
-      } else if (key === 'internal_state_map' && value) {
-        values.push(JSON.stringify(value));
-      } else {
-        values.push(value === undefined ? null : value);
-      }
-    });
-
-    if (fields.length > 0) {
-      values.push(id);
-      db.execute(
-        `UPDATE story_nodes SET ${fields.join(', ')} WHERE id = ?`,
-        values
-      );
-      console.log(`Node updated: ${id}`);
+    const oldNodeQuery = db.query('SELECT * FROM story_nodes WHERE id = ?', [id]);
+    if (oldNodeQuery.length === 0) {
+      console.warn(`Attempted to update non-existent node: ${id}`);
+      return;
     }
+    const oldNode = oldNodeQuery[0] as StoryNode;
+
+    await executeCommand(db, updateNodeCommand(id, oldNode, updates));
+    console.log(`Node updated: ${id}`);
   });
 
   ipcMain.handle('node-delete', async (_event, id: string) => {
     if (!db) throw new Error('Database not initialized');
-    db.execute('DELETE FROM story_nodes WHERE id = ?', [id]);
-    console.log(`Node deleted: ${id}`);
+    const nodeToDelete: StoryNode[] = db.query('SELECT * FROM story_nodes WHERE id = ?', [id]);
+    if (nodeToDelete.length > 0) {
+      await executeCommand(db, deleteNodeCommand(nodeToDelete[0]));
+      console.log(`Node deleted: ${id}`);
+    } else {
+      console.warn(`Attempted to delete non-existent node: ${id}`);
+    }
   });
 
   /**
@@ -461,7 +543,9 @@ export function registerIpcHandlers() {
     }
 
     // 2. Always update stored x, y (this is the "cache" for root nodes)
-    db.execute('UPDATE story_nodes SET x = ?, y = ? WHERE id = ?', [x, y, id]);
+    // db.execute('UPDATE story_nodes SET x = ?, y = ? WHERE id = ?', [x, y, id]);
+    // This is now handled by the command
+    await executeCommand(db, updateNodePositionCommand(id, node.x, node.y, x, y));
 
     // 3. If this is an anchored node, recalculate its drift
     if (node.anchor_id) {
@@ -493,7 +577,14 @@ export function registerIpcHandlers() {
 
         // Solve for new drift
         const newDriftX = (currentDistX - portOffsetX) / PIXELS_PER_SECOND;
-        const newDriftY = Math.round(currentDistY / PIXELS_PER_TRACK);
+
+        // Only allow vertical drift adjustments for STACK connections to keep PREPEND/APPEND aligned
+        let newDriftY = 0;
+        if (node.connection_mode === 'STACK') {
+          newDriftY = Math.round(currentDistY / PIXELS_PER_TRACK);
+        } else {
+          newDriftY = 0;
+        }
 
         // Update drift in database
         db.execute(
@@ -653,21 +744,18 @@ export function registerIpcHandlers() {
       // Therefore: drift_x = (currentDistX - portOffsetX) / PIXELS_PER_SECOND
       const newDriftX = (currentDistX - portOffsetX) / PIXELS_PER_SECOND;
 
-      // 5. Snap drift_y to nearest track
-      const newDriftY = Math.round(currentDistY / PIXELS_PER_TRACK);
+      // 5. Snap drift_y to nearest track, but only allow vertical drift for STACK
+      let newDriftY = 0;
+      if (connectionMode === 'STACK') {
+        newDriftY = Math.round(currentDistY / PIXELS_PER_TRACK);
+      } else {
+        newDriftY = 0; // Keep horizontal anchors perfectly aligned
+      }
 
       console.log(`[Node Link] Smart Initial Drift calculated: driftX=${newDriftX}s, driftY=${newDriftY} tracks`);
 
       // 6. Update database
-      db.execute(
-        `UPDATE story_nodes
-        SET anchor_id = ?,
-            connection_mode = ?,
-            drift_x = ?,
-            drift_y = ?
-        WHERE id = ?`,
-        [parentId, connectionMode, newDriftX, newDriftY, childId]
-      );
+      await executeCommand(db, linkNodeCommand(childId, parentId, connectionMode, child.anchor_id, child.connection_mode, child.drift_x || 0, child.drift_y || 0, newDriftX, newDriftY));
 
       return { success: true };
     } catch (err: any) {
@@ -705,12 +793,7 @@ export function registerIpcHandlers() {
       }
 
       // Update DB: remove anchor
-      db.execute(
-        `UPDATE story_nodes
-         SET anchor_id = NULL, connection_mode = 'STACK', drift_x = 0, drift_y = 0
-         WHERE id = ?`,
-        [nodeId]
-      );
+      await executeCommand(db, unlinkNodeCommand(nodeId, node.anchor_id, node.connection_mode || 'STACK', node.drift_x || 0, node.drift_y || 0));
 
       console.log(`[Node Unlink] Successfully unlinked ${nodeId}`);
 
@@ -768,52 +851,10 @@ export function registerIpcHandlers() {
     }
   });
 
-  /**
-   * Phase 4.2: Move node to a spine's attic
-   * Removes anchor and sets attic_parent_id
-   */
-  ipcMain.handle('node-move-to-attic', async (_event, nodeId: string, spineId: string) => {
-    if (!db) throw new Error('Database not initialized');
-
-    try {
-      console.log(`[Node Move To Attic] Moving ${nodeId} to attic of spine ${spineId}`);
-
-      // Verify spine exists
-      const spines: StoryNode[] = db.query('SELECT * FROM story_nodes WHERE id = ?', [spineId]);
-      if (spines.length === 0) {
-        return {
-          success: false,
-          error: 'Spine node not found',
-        };
-      }
-
-      // Update node: remove anchor, set attic_parent_id
-      db.execute(
-        `UPDATE story_nodes
-         SET attic_parent_id = ?,
-             anchor_id = NULL,
-             connection_mode = 'STACK',
-             drift_x = 0,
-             drift_y = 0
-         WHERE id = ?`,
-        [spineId, nodeId]
-      );
-
-      console.log(`[Node Move To Attic] Successfully moved ${nodeId} to attic`);
-
-      return { success: true };
-    } catch (error) {
-      console.error('[Node Move To Attic] Error:', error);
-      return {
-        success: false,
-        error: error instanceof Error ? error.message : 'Unknown error',
-      };
-    }
-  });
 
   /**
    * Phase 4.2: Move node to bucket
-   * Removes both anchor and attic_parent_id
+   * Removes anchor and resets position
    */
   ipcMain.handle('node-move-to-bucket', async (_event, nodeId: string) => {
     if (!db) throw new Error('Database not initialized');
@@ -821,14 +862,15 @@ export function registerIpcHandlers() {
     try {
       console.log(`[Node Move To Bucket] Moving ${nodeId} to bucket`);
 
-      // Update node: remove anchor and attic_parent_id
+      // Update node: remove anchor
       db.execute(
         `UPDATE story_nodes
-         SET attic_parent_id = NULL,
-             anchor_id = NULL,
+         SET anchor_id = NULL,
              connection_mode = 'STACK',
              drift_x = 0,
-             drift_y = 0
+             drift_y = 0,
+             x = -1000, -- Move visually to bucket
+             is_global = 1 -- Flag as bucket item
          WHERE id = ?`,
         [nodeId]
       );
@@ -843,6 +885,242 @@ export function registerIpcHandlers() {
         error: error instanceof Error ? error.message : 'Unknown error',
       };
     }
+  });
+
+  // ===========================================================================
+  // CONTAINER OPERATIONS (Phase 5: Acts & Scenes)
+  // ===========================================================================
+
+  /**
+   * Create a new container (Act or Scene)
+   * Phase 5: Fractal containers for organizing nodes
+   */
+  ipcMain.handle('container-create', async (
+    _event,
+    _canvasId: string,
+    containerData: Omit<FractalContainer, 'id'>
+  ) => {
+    if (!db) throw new Error('Database not initialized');
+
+    const id = uuidv4();
+
+    const container: FractalContainer = {
+      id,
+      ...containerData,
+    };
+
+    db.execute(
+      `INSERT INTO fractal_containers (
+        id, project_id, canvas_id, parent_id, type, name,
+        x, y, width, height, color,
+        ANCHOR_START_ID, ANCHOR_START_DRIFT, ANCHOR_END_ID, ANCHOR_END_DRIFT
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        container.id,
+        container.project_id,
+        container.canvas_id,
+        container.parent_id || null,
+        container.type,
+        container.name,
+        container.x,
+        container.y,
+        container.width,
+        container.height,
+        container.color || null,
+        container.ANCHOR_START_ID || null,
+        container.ANCHOR_START_DRIFT || 0,
+        container.ANCHOR_END_ID || null,
+        container.ANCHOR_END_DRIFT || 0,
+      ]
+    );
+
+    console.log(`[Container Create] Created ${container.type}: ${container.name} (${container.id})`);
+    return container;
+  });
+
+  /**
+   * Get all containers for a canvas
+   */
+  ipcMain.handle('container-list', async (_event, canvasId: string) => {
+    if (!db) throw new Error('Database not initialized');
+
+    const containers = db.query(
+      'SELECT * FROM fractal_containers WHERE canvas_id = ? ORDER BY type DESC, name ASC',
+      [canvasId]
+    );
+
+    console.log(`[Container List] Found ${containers.length} containers for canvas ${canvasId}`);
+    return containers as FractalContainer[];
+  });
+
+  /**
+   * Get a single container by ID
+   */
+  ipcMain.handle('container-get', async (_event, containerId: string) => {
+    if (!db) throw new Error('Database not initialized');
+
+    const containers = db.query(
+      'SELECT * FROM fractal_containers WHERE id = ?',
+      [containerId]
+    );
+
+    return containers.length > 0 ? containers[0] as FractalContainer : null;
+  });
+
+  /**
+   * Update a container
+   */
+  ipcMain.handle('container-update', async (_event, id: string, updates: Partial<FractalContainer>) => {
+    if (!db) throw new Error('Database not initialized');
+
+    const fields: string[] = [];
+    const values: any[] = [];
+
+    // Build dynamic UPDATE query
+    Object.entries(updates).forEach(([key, value]) => {
+      if (key === 'id') return; // Don't update ID
+      fields.push(`${key} = ?`);
+      values.push(value === undefined ? null : value);
+    });
+
+    if (fields.length > 0) {
+      values.push(id);
+      db.execute(
+        `UPDATE fractal_containers SET ${fields.join(', ')} WHERE id = ?`,
+        values
+      );
+      console.log(`[Container Update] Updated container: ${id}`);
+    }
+  });
+
+  /**
+   * Update container position and size
+   */
+  ipcMain.handle('container-update-bounds', async (
+    _event,
+    id: string,
+    x: number,
+    y: number,
+    width: number,
+    height: number
+  ) => {
+    if (!db) throw new Error('Database not initialized');
+
+    db.execute(
+      'UPDATE fractal_containers SET x = ?, y = ?, width = ?, height = ? WHERE id = ?',
+      [x, y, width, height, id]
+    );
+    console.log(`[Container Update] Bounds updated for ${id}: (${x}, ${y}) ${width}x${height}`);
+  });
+
+  /**
+   * Delete a container
+   * Note: Nodes inside the container will have their act_id/scene_id set to NULL (ON DELETE SET NULL)
+   */
+  ipcMain.handle('container-delete', async (_event, id: string) => {
+    if (!db) throw new Error('Database not initialized');
+
+    // First, get all nodes in this container and move them to unassigned
+    // (The FK constraint will handle this via ON DELETE SET NULL, but we can be explicit)
+    db.execute('UPDATE story_nodes SET act_id = NULL WHERE act_id = ?', [id]);
+    db.execute('UPDATE story_nodes SET scene_id = NULL WHERE scene_id = ?', [id]);
+
+    // Delete the container (child containers will also be deleted via CASCADE)
+    db.execute('DELETE FROM fractal_containers WHERE id = ?', [id]);
+
+    console.log(`[Container Delete] Deleted container: ${id}`);
+  });
+
+  /**
+   * Assign a node to a container (Act or Scene)
+   */
+  ipcMain.handle('container-assign-node', async (
+    _event,
+    nodeId: string,
+    containerId: string,
+    containerType: 'ACT' | 'SCENE'
+  ) => {
+    if (!db) throw new Error('Database not initialized');
+
+    if (containerType === 'ACT') {
+      db.execute('UPDATE story_nodes SET act_id = ? WHERE id = ?', [containerId, nodeId]);
+    } else {
+      db.execute('UPDATE story_nodes SET scene_id = ? WHERE id = ?', [containerId, nodeId]);
+    }
+
+    console.log(`[Container Assign] Node ${nodeId} assigned to ${containerType} ${containerId}`);
+  });
+
+  /**
+   * Remove a node from its container
+   */
+  ipcMain.handle('container-unassign-node', async (
+    _event,
+    nodeId: string,
+    containerType: 'ACT' | 'SCENE'
+  ) => {
+    if (!db) throw new Error('Database not initialized');
+
+    if (containerType === 'ACT') {
+      db.execute('UPDATE story_nodes SET act_id = NULL WHERE id = ?', [nodeId]);
+    } else {
+      db.execute('UPDATE story_nodes SET scene_id = NULL WHERE id = ?', [nodeId]);
+    }
+
+    console.log(`[Container Unassign] Node ${nodeId} removed from ${containerType}`);
+  });
+
+  /**
+   * Get all nodes in a container
+   */
+  ipcMain.handle('container-get-nodes', async (_event, containerId: string, containerType: 'ACT' | 'SCENE') => {
+    if (!db) throw new Error('Database not initialized');
+
+    const column = containerType === 'ACT' ? 'act_id' : 'scene_id';
+    const nodes = db.query(
+      `SELECT * FROM story_nodes WHERE ${column} = ?`,
+      [containerId]
+    );
+
+    return nodes as StoryNode[];
+  });
+
+  /**
+   * Calculate container bounds based on contained nodes
+   * Returns the bounding box that would encompass all nodes in the container
+   */
+  ipcMain.handle('container-calculate-bounds', async (_event, containerId: string, containerType: 'ACT' | 'SCENE') => {
+    if (!db) throw new Error('Database not initialized');
+
+    const column = containerType === 'ACT' ? 'act_id' : 'scene_id';
+    const nodes: StoryNode[] = db.query(
+      `SELECT * FROM story_nodes WHERE ${column} = ?`,
+      [containerId]
+    );
+
+    if (nodes.length === 0) {
+      return null; // No nodes to calculate bounds from
+    }
+
+    const padding = 50; // Padding around nodes
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+
+    nodes.forEach(node => {
+      minX = Math.min(minX, node.x);
+      minY = Math.min(minY, node.y);
+      maxX = Math.max(maxX, node.x + (node.width || 200));
+      maxY = Math.max(maxY, node.y + (node.height || 150));
+    });
+
+    return {
+      x: minX - padding,
+      y: minY - padding,
+      width: maxX - minX + padding * 2,
+      height: maxY - minY + padding * 2,
+    };
   });
 
   // ===========================================================================

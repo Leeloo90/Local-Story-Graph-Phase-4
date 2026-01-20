@@ -1,14 +1,17 @@
 import React, { useState } from 'react';
 import { Play, Pause, SkipBack, SkipForward, PanelRightClose, PanelLeftClose, GripVertical } from 'lucide-react';
-import WordHighlighter from './WordHighlighter';
+import WordHighlighter from './Inspector/WordHighlighter';
+import MulticamAnglesPanel from './Inspector/MulticamAnglesPanel';
+import { StoryNode } from '../../../shared/types';
 
 interface InspectorPanelProps {
+  selectedNode?: StoryNode;
   onToggleCollapse?: () => void;
   position?: 'left' | 'right';
 }
 
-const InspectorPanel: React.FC<InspectorPanelProps> = ({ onToggleCollapse, position = 'right' }) => {
-  const [activeTab, setActiveTab] = useState<'media' | 'canvas' | 'highlighter'>('media');
+const InspectorPanel: React.FC<InspectorPanelProps> = ({ selectedNode, onToggleCollapse, position = 'right' }) => {
+  const [activeTab, setActiveTab] = useState<'media' | 'canvas' | 'highlighter' | 'angles'>('media');
   const [isPlaying, setIsPlaying] = useState(false);
 
   const tabs = [
@@ -16,6 +19,10 @@ const InspectorPanel: React.FC<InspectorPanelProps> = ({ onToggleCollapse, posit
     { id: 'canvas', label: 'Canvas' },
     { id: 'highlighter', label: 'Highlighter' },
   ];
+
+  if (selectedNode?.subtype === 'MULTICAM') {
+    tabs.push({ id: 'angles', label: 'Angles' });
+  }
 
   return (
     <div className="flex flex-col h-full">
@@ -192,7 +199,25 @@ const InspectorPanel: React.FC<InspectorPanelProps> = ({ onToggleCollapse, posit
           </div>
         )}
 
-        {activeTab === 'highlighter' && <WordHighlighter />}
+        {activeTab === 'highlighter' && (
+          selectedNode ? (
+            <WordHighlighter node={selectedNode} />
+          ) : (
+            <div className="p-4 text-center text-text-tertiary">
+              <p>Select a node to view its transcript.</p>
+            </div>
+          )
+        )}
+        
+        {activeTab === 'angles' && (
+          selectedNode && selectedNode.subtype === 'MULTICAM' ? (
+            <MulticamAnglesPanel node={selectedNode} />
+          ) : (
+            <div className="p-4 text-center text-text-tertiary">
+              <p>Select a multicam node to view its angles.</p>
+            </div>
+          )
+        )}
       </div>
     </div>
   );

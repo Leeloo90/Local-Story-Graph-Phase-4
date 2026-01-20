@@ -77,8 +77,8 @@ const NodeContextMenu: React.FC<NodeContextMenuProps> = ({
               {node.drift_x !== 0 && (
                 <div className="text-text-tertiary">Drift: {node.drift_x}s</div>
               )}
-              {node.drift_y !== 0 && (
-                <div className="text-text-tertiary">Track offset: {node.drift_y > 0 ? '+' : ''}{node.drift_y}</div>
+              {(node.drift_y ?? 0) !== 0 && (
+                <div className="text-text-tertiary">Track offset: {(node.drift_y ?? 0) > 0 ? '+' : ''}{node.drift_y}</div>
               )}
             </div>
           </div>

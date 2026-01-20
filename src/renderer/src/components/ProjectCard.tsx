@@ -5,12 +5,14 @@ import { Project } from '../../../shared/types';
 interface ProjectCardProps {
   project: Project;
   onClick: () => void;
+  onContextMenu?: (e: React.MouseEvent) => void;
   variant?: 'grid' | 'list';
 }
 
 const ProjectCard: React.FC<ProjectCardProps> = ({
   project,
   onClick,
+  onContextMenu,
   variant = 'grid'
 }) => {
   const getStatusBadgeClass = (status: string) => {
@@ -42,6 +44,7 @@ const ProjectCard: React.FC<ProjectCardProps> = ({
     return (
       <div
         onClick={onClick}
+        onContextMenu={onContextMenu}
         className="panel rounded-lg p-4 cursor-pointer transition-all hover:border-accent-indigo hover:shadow-node-active group"
       >
         <div className="flex items-center justify-between">
@@ -79,6 +82,7 @@ const ProjectCard: React.FC<ProjectCardProps> = ({
   return (
     <div
       onClick={onClick}
+      onContextMenu={onContextMenu}
       className="panel rounded-lg overflow-hidden cursor-pointer transition-all hover:border-accent-indigo hover:shadow-node-active hover:-translate-y-1 group"
     >
       {/* Thumbnail */}

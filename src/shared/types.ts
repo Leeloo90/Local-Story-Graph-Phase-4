@@ -13,6 +13,8 @@ export interface Project {
   description?: string;
   client?: string;
   status: 'ACTIVE' | 'ARCHIVED' | 'COMPLETED';
+  defaultFps: number; // Default FPS for new canvases in this project
+  defaultResolution: string; // Default resolution for new canvases in this project
   created_at: string; // ISO timestamp
   updated_at: string; // ISO timestamp
 }
@@ -36,6 +38,14 @@ export interface MediaAsset {
   created_at: string;
 }
 
+export interface TranscriptDB {
+  media_id: string;
+  source_type: string;
+  raw_text: string;
+  word_map_json: string;
+  created_at: number;
+}
+
 export interface Transcript {
   id: string;
   asset_id: string; // FK to media_library
@@ -43,14 +53,16 @@ export interface Transcript {
   time_in: number; // Frame number
   time_out: number; // Frame number
   content: string; // The spoken text
-  word_map?: WordMapEntry[]; // JSON array
+  word_map?: WordToken[]; // JSON array
   sync_offset_frames?: number;
 }
 
-export interface WordMapEntry {
-  word: string;
-  frame_in: number;
-  frame_out: number;
+export interface WordToken {
+  id: number;
+  text: string;
+  start: number; // Seconds
+  end: number; // Seconds
+  confidence?: number;
 }
 
 export interface FractalContainer {
@@ -78,7 +90,7 @@ export interface StoryNode {
   act_id?: string; // FK to fractal_containers
   scene_id?: string; // FK to fractal_containers
   type: 'SPINE' | 'SATELLITE';
-  subtype: 'VIDEO' | 'MUSIC' | 'TEXT' | 'IMAGE';
+  subtype: 'VIDEO' | 'MUSIC' | 'TEXT' | 'IMAGE' | 'MULTICAM';
   is_global: boolean; // True for nodes in "The Bucket"
   // Canvas position (x, y are visual positions on canvas)
   x: number;
@@ -93,10 +105,6 @@ export interface StoryNode {
   connection_mode?: ConnectionMode; // How this node connects to its parent
   drift_x?: number; // REAL: Temporal offset in seconds
   drift_y?: number; // INTEGER: Track offset (0 = same track, +1 = above, -1 = below)
-
-  // Attic system (Magnetic Construction v2)
-  // Nodes in the Attic are "parked" above a Spine, not yet committed to the edit
-  attic_parent_id?: string; // FK to story_nodes (the Spine this node is parked under)
 
   // Clip trimming (in seconds)
   clip_in?: number; // Trim start (seconds from asset start)
@@ -113,6 +121,8 @@ export interface StoryNode {
     duration: number;       // clip_out - clip_in (seconds)
     generation: number;     // Depth in anchor chain (0 = root, 1 = child, etc.)
     hasAnchor: boolean;     // Quick check if node is anchored
+    elasticWidth: number;   // Calculated width including children stretch
+    attachedChildren: Array<{ id: string; relX: number }>; // Children positions for dynamic handles
   };
 }
 
@@ -136,14 +146,14 @@ export interface ProjectSettings {
 }
 
 export interface MulticamMember {
-  id: string;
-  parent_asset_id: string; // FK to media_library (the MULTICAM container)
-  child_asset_id: string; // FK to media_library (the source file)
-  track_index: number; // Angle number
-  sync_offset?: number; // Frame offset
-  is_primary_audio: boolean;
-  audio_role?: string; // e.g., "Dialogue", "Music"
-  is_sync_reference: boolean;
+  multicam_media_id: string; // FK to media_library (the MULTICAM container)
+  member_media_id: string; // FK to media_library (the source angle file)
+  angle_label: string; // Display name for the angle
+  sync_offset?: number; // Time offset in seconds
+  audio_channel_map?: string; // Audio channel routing (JSON)
+  // Additional fields from JOIN with media_library
+  file_path?: string;
+  clean_name?: string;
 }
 
 // ============================================================================
@@ -220,6 +230,16 @@ export interface IpcChannels {
   'node-validate-anchor': (childId: string, parentId: string, connectionMode: ConnectionMode) => Promise<{ valid: boolean; reason?: string }>;
   'node-change-type': (nodeId: string, newType: 'SPINE' | 'SATELLITE') => Promise<{ success: boolean; error?: string }>;
 
+  // Multicam operations
+  'multicam:get-members': (multicamMediaId: string) => Promise<MulticamMember[]>;
+
+  // Export operations
+  'export:generate-fcpxml': (projectId: string, filePath: string) => Promise<{ success: boolean; error?: string }>;
+
+  // History operations
+  'history:undo': () => Promise<void>;
+  'history:redo': () => Promise<void>;
+
   // Backup operations
   'backup-create': () => Promise<void>;
   'backup-restore': (backupPath: string) => Promise<void>;
@@ -275,9 +295,17 @@ export interface ReactFlowNodeData {
   onDelete?: (id: string) => void;
 }
 
+// Phase 5: Container node data for React Flow
+export interface ContainerNodeData {
+  container: FractalContainer;
+  onDelete?: (id: string) => void;
+  onRename?: (id: string, newName: string) => void;
+  onResize?: (id: string, width: number, height: number) => void;
+}
+
 export interface ReactFlowNode {
   id: string;
-  type: 'spineNode' | 'satelliteNode' | 'multicamNode';
+  type: 'spineNode' | 'satelliteNode' | 'multicamNode' | 'container';
   position: { x: number; y: number };
-  data: ReactFlowNodeData;
+  data: ReactFlowNodeData | ContainerNodeData;
 }

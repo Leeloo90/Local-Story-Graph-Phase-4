@@ -1,13 +1,21 @@
 import React from 'react';
-import { Handle, Position, NodeProps } from '@xyflow/react';
+import { Handle, Position } from '@xyflow/react';
 import { Layers } from 'lucide-react';
+import { ReactFlowNodeData } from '../../../../shared/types';
 
-const MulticamNode: React.FC<NodeProps> = ({ data, selected }) => {
-  const formatFrames = (frames: number) => {
-    const fps = 30;
-    const seconds = Math.floor(frames / fps);
+interface MulticamNodeProps {
+  data: ReactFlowNodeData;
+  selected?: boolean;
+}
+
+const MulticamNode: React.FC<MulticamNodeProps> = ({ data, selected }) => {
+  const { storyNode, label } = data;
+  const activeAngle = storyNode?.internal_state_map?.active_angle || 'CAM A';
+
+  const formatDuration = (seconds: number | null | undefined) => {
+    if (!seconds) return '0:00';
     const mins = Math.floor(seconds / 60);
-    const secs = seconds % 60;
+    const secs = Math.floor(seconds % 60);
     return `${mins}:${secs.toString().padStart(2, '0')}`;
   };
 
@@ -27,7 +35,7 @@ const MulticamNode: React.FC<NodeProps> = ({ data, selected }) => {
             Multicam
           </span>
         </div>
-        <span className="badge-multicam text-[10px]">MC</span>
+        <span className="badge-multicam text-[10px]">{activeAngle}</span>
       </div>
 
       {/* Quad Preview */}
@@ -35,7 +43,7 @@ const MulticamNode: React.FC<NodeProps> = ({ data, selected }) => {
         {[1, 2, 3, 4].map((angle) => (
           <div
             key={angle}
-            className="aspect-video bg-void-dark flex items-center justify-center"
+            className={`aspect-video bg-void-dark flex items-center justify-center ${activeAngle === `CAM ${String.fromCharCode(64 + angle)}` ? 'border-2 border-accent-amber' : ''}`}
           >
             <span className="text-[10px] text-text-tertiary font-mono">
               CAM {String.fromCharCode(64 + angle)}
@@ -46,15 +54,12 @@ const MulticamNode: React.FC<NodeProps> = ({ data, selected }) => {
 
       {/* Content */}
       <div className="p-3">
-        <h4 className="text-sm font-medium text-text-primary mb-1">
-          {data.label}
+        <h4 className="text-sm font-medium text-text-primary mb-1 truncate">
+          {label}
         </h4>
         <div className="flex items-center justify-between text-xs">
           <span className="timecode text-text-tertiary">
-            {formatFrames(data.duration_frames || 0)}
-          </span>
-          <span className="badge-multicam text-[10px]">
-            {data.active_angle || 'CAM A'}
+            {formatDuration(storyNode?.clip_out ? storyNode.clip_out - (storyNode.clip_in || 0) : 0)}
           </span>
         </div>
       </div>
@@ -76,9 +81,9 @@ const MulticamNode: React.FC<NodeProps> = ({ data, selected }) => {
         id="anchor-right"
       />
 
-      {/* Top Anchor - Stacking anchor for nodes above */}
+      {/* Top Anchor - Stacking anchor for nodes above (source for children to attach) */}
       <Handle
-        type="both"
+        type="source"
         position={Position.Top}
         className="!w-3 !h-3 !bg-accent-amber !border-2 !border-surface-high"
         id="anchor-top"

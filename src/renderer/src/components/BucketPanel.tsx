@@ -1,13 +1,13 @@
 import React from 'react';
 import { Archive, X } from 'lucide-react';
-import { StoryNodeType } from '../../../shared/types';
+import { StoryNode } from '../../../shared/types';
 
 interface BucketPanelProps {
   isOpen: boolean;
-  items: StoryNodeType[];
+  items: StoryNode[];
   onClose: () => void;
-  onItemClick?: (item: StoryNodeType) => void;
-  onItemDragStart?: (item: StoryNodeType, event: React.DragEvent) => void;
+  onItemClick?: (item: StoryNode) => void;
+  onItemDragStart?: (item: StoryNode, event: React.DragEvent) => void;
   onItemDelete?: (itemId: string) => void;
 }
 
